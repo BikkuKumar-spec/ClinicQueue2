@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+torch
+transformers
+sentencepiece
+mosestokenizer
+huggingface_hub
+IndicTrans2
+pydantic
