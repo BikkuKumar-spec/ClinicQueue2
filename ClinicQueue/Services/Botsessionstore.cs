@@ -11,7 +11,7 @@ namespace ClinicQueue.Services
             _userLanguages = new();
 
         // ✅ Per-user semaphore — ensures only ONE message per phone number is
-        // processed at a time. Without this, a slow Qwen response races against
+        // processes at a time. Without this, a slow Llama response races against
         // the user's next message and overwrites the advanced session state.
         private readonly ConcurrentDictionary<string, SemaphoreSlim>
             _locks = new();

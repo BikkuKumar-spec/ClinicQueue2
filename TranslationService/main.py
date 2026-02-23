@@ -20,7 +20,7 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:3b-instruct")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.1")
 
 app = FastAPI(title="Indic Translation Service + Hinglish Support")
 
@@ -249,9 +249,9 @@ def sanitize_ai_output(output: dict) -> dict:
     return cleaned
 
 # ------------------------
-# Qwen Call (UNCHANGED)
+# Llama Call (UNCHANGED)
 # ------------------------
-def call_qwen(user_message: str, history):
+def call_llama(user_message: str, history):
     try:
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         messages.extend(history)
@@ -328,7 +328,7 @@ async def chat(request: ChatRequest):
         english_input = run_translation(user_text, detected_lang, "eng_Latn")
         logger.info(f"[TRANSLATE RESULT] {english_input}")
 
-    english_output = await asyncio.to_thread(call_qwen, english_input, list(history))
+    english_output = await asyncio.to_thread(call_llama, english_input, list(history))
 
     history.append({"role": "user", "content": english_input})
     history.append({"role": "assistant", "content": json.dumps(english_output)})

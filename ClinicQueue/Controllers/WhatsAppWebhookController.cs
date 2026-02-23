@@ -104,9 +104,9 @@ namespace ClinicQueue.Controllers
 
                             // ✅ Per-user serialized processing.
                             // Only ONE message per phone number runs at a time.
-                            // If a Qwen response takes 25s and the user presses a button
+                            // If a Llama response takes 25s and the user presses a button
                             // during that time, the button is queued and processed AFTER
-                            // Qwen finishes — session state is never clobbered.
+                            // Llama finishes — session state is never clobbered.
                             _ = Task.Run(async () =>
                             {
                                 using var scope = _scopeFactory.CreateScope();

@@ -92,7 +92,7 @@ builder.Services.AddHttpClient<IAISymptomService, AISymptomService>(client =>
     client.BaseAddress = new Uri("http://localhost:5001/");
     // ✅ Timeout set to 150s — must be GREATER than the Python/Ollama timeout (120s)
     // so that Python's own fallback fires first before C# cancels the request.
-    // On CPU-only machines, Qwen2.5-3b can take 60-120s to respond.
+    // On CPU-only machines, Llama-3.1-8B-Instruct can take 60-120s to respond.
     client.Timeout = TimeSpan.FromSeconds(150);
 });
 

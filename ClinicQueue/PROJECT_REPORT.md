@@ -386,7 +386,7 @@ ClinicQueueProject/
 1. **Backend:** `dotnet run` from `ClinicQueue/ClinicQueue/`
 2. **Frontend:** `npm run dev` from `ClinicQueue/ClinicQueue/frontend/`
 3. **Tunnel:** `ngrok http 5000` for WhatsApp webhook
-4. **AI:** Start Ollama with `ollama serve` (i use the model qwen2.5:3b-instruct)
+4. **AI:** Start Ollama with `ollama serve` (i use the model Llama-3.1-8B-Instruct)
 
 ---
 

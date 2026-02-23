@@ -79,7 +79,7 @@ User: "मुझे पेट में दर्द और उल्टी ह�
 Bot: "🔍 आपके लक्षणों का विश्लेषण हो रहा है...
      Analyzing your symptoms..."
 
-[AI Processing via Qwen2.5:3b-instruct]
+[AI Processing via Llama-3.1-8B-Instruct]
 
 Bot: "✅ विश्लेषण पूर्ण!
 
@@ -277,7 +277,7 @@ STATE 3: SYMPTOM_COLLECTION
 STATE 4: SYMPTOM_ANALYSIS
 - AI is analyzing symptoms
 - Show loading message
-- Call Qwen2.5:3b-instruct API
+- Call Llama-3.1-8B-Instruct API
 
 STATE 5: RECOMMENDATION_SHOWN
 - AI recommendation displayed
@@ -318,7 +318,7 @@ INITIAL → MENU_SELECTED
 
 ---
 
-## 🤖 Qwen2.5 Integration Points
+## 🤖 Llama-3.1-8B-Instruct
 
 ### **Integration Point 1: Symptom Entry**
 
@@ -334,7 +334,7 @@ INITIAL → MENU_SELECTED
 
 **When:** In STATE 4 (SYMPTOM_ANALYSIS)
 
-**Qwen Prompt:**
+**Llama-3.1-8B-Instruct**
 ```
 {SYSTEM_PROMPT - See "AI_PROMPTS_QWEN_SYMPTOM_ANALYSIS.md"}
 
@@ -726,7 +726,7 @@ Translation Time: 0.8 seconds
 ### **Backend Tasks**
 - [ ] Create SymptomAnalyses database table
 - [ ] Implement LanguageDetectionService
-- [ ] Integrate Qwen2.5:3b-instruct API
+- [ ] Integrate Llama-3.1-8B-Instruct API
 - [ ] Add translation API (Google/Azure)
 - [ ] Create multi-language message templates
 - [ ] Update WhatsAppMessageHandler with new states
@@ -738,7 +738,7 @@ Translation Time: 0.8 seconds
 - [ ] Update menu with AI option
 - [ ] Implement state machine for conversation flow
 - [ ] Add symptom collection logic
-- [ ] Integrate Qwen API calls
+- [ ] Integrate Llama-3.1-8B-Instruct calls
 - [ ] Add language-aware responses
 - [ ] Implement "More Symptoms" flow
 - [ ] Add emergency alert system
@@ -757,7 +757,7 @@ Translation Time: 0.8 seconds
 - [ ] Unit tests for language detection
 - [ ] Integration tests for AI flow
 - [ ] End-to-end user journey tests
-- [ ] Load testing for Qwen API
+- [ ] Load testing for Llama-3.1-8B-Instruct
 - [ ] Multi-language UI tests
 - [ ] Emergency scenario tests
 
@@ -777,7 +777,7 @@ Translation Time: 0.8 seconds
 **Next Steps:**
 1. Review this plan with team
 2. Get approval on menu structure
-3. Set up Qwen2.5:3b-instruct API
+3. Set up Llama-3.1-8B-Instruct API
 4. Implement backend services
 5. Test thoroughly before launch
 
