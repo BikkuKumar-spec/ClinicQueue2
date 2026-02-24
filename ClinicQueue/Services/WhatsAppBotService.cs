@@ -221,7 +221,7 @@ namespace ClinicQueue.Services
         {
             lang ??= _sessions.GetLanguage(phoneNumber);
 
-            var text = await T("Hello Shloka!\nI am SentiCore :D\nHow are you feeling today?.", lang);
+            var text = await T("Hello Shloka!\nI am SentiCore :D\nHow are you feeling today?", lang);
             await _metaService.SendTextMessageAsync(phoneNumber, text);
 
             _sessions.Set(phoneNumber, "CONVERSATIONAL", new BookingSession

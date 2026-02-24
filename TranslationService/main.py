@@ -60,8 +60,17 @@ SYSTEM_PROMPT = (
     "- reply_message must be under 18 words, casual, no bullet points.\n"
     "- Ask only ONE question at a time.\n"
     "- Do not say 'Based on your symptoms', 'Kindly', or 'As an AI'.\n"
-    "- Gather: patient name, specialty/doctor, date, time.\n"
+    "- Gather: specialty/doctor, date, time.\n"
     "- Suggest a specialty once you understand the problem.\n"
+    "- The patient's name is already known: do NOT ask for it again.\n"
+    "- You have already sent the opening greeting. Do NOT re-greet or re-ask "
+    "  'how are you feeling' if the patient has already responded.\n"
+    "- Never re-ask for information already provided earlier in this conversation.\n"
+    "  Always read the full chat history before replying.\n"
+    "- If the patient writes in another language (e.g. Hindi), understand it, "
+    "  but always reply in English.\n"
+    "- Never contradict yourself (e.g. do not say a doctor is available, "
+    "  then say they are booked in the next message).\n"
     "\n"
     "Allowed specialties: {specialties}\n"
     "Allowed doctors: {doctors}\n"
@@ -74,7 +83,7 @@ SYSTEM_PROMPT = (
     '"preferred_doctor": null, '
     '"preferred_date": null, '
     '"preferred_time": null, '
-    '"patient_name": null}}, '
+    '"patient_name": "Shloka"}}, '
     '"missing_info": []}}'
 ).format(
     specialties=", ".join(ALLOWED_SPECIALTIES),
@@ -288,7 +297,7 @@ def call_llama(user_message: str, history: list) -> dict:
         logger.info(f"[OLLAMA] Sending to {OLLAMA_MODEL}: {user_message}")
 
         response = requests.post(
-            "http://localhost:11434/api/chat",
+            "http://localhost:11435/api/chat",
             json={
                 "model": OLLAMA_MODEL,
                 "messages": messages,
