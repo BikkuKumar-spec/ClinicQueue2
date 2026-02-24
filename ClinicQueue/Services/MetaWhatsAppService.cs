@@ -30,8 +30,13 @@ namespace ClinicQueue.Services
             _httpClient = httpClient;
             _logger = logger;
 
+            _logger.LogInformation($"PHONE ID: [{_phoneNumberId}]");
+_logger.LogInformation($"TOKEN LENGTH: {_accessToken?.Length}");
+_logger.LogInformation($"TOKEN START: {_accessToken?.Substring(0,5)}");
+
             // Configure HttpClient
-            _httpClient.DefaultRequestHeaders.Add("Authorization", $"Bearer {_accessToken}");
+            _httpClient.DefaultRequestHeaders.Authorization =
+            new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _accessToken);
         }
 
         private string GetApiUrl() => $"https://graph.facebook.com/{_apiVersion}/{_phoneNumberId}/messages";

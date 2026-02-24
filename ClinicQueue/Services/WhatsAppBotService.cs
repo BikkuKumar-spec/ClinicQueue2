@@ -217,14 +217,20 @@ namespace ClinicQueue.Services
         }
 
         // ─── Welcome ──────────────────────────────────────────────────────────────
-
         private async Task<string> SendWelcomeMessage(string phoneNumber, string? lang = null)
         {
             lang ??= _sessions.GetLanguage(phoneNumber);
-            var text = await T("Welcome to Dr. Sharma's Clinic! I am your AI assistant. How can I help you today? Please describe any symptoms you are experiencing.", lang);
+
+            var text = await T("Hello Shloka!\nI am SentiCore :D\nHow are you feeling today?.", lang);
             await _metaService.SendTextMessageAsync(phoneNumber, text);
-            
-            _sessions.Set(phoneNumber, "CONVERSATIONAL", new BookingSession { SymptomLanguage = lang });
+
+            _sessions.Set(phoneNumber, "CONVERSATIONAL", new BookingSession
+            {
+                SymptomLanguage = lang,
+                PatientName = "Shloka",
+                PatientNameEnglish = "Shloka"
+            });
+
             return "CONVERSATIONAL";
         }
 
