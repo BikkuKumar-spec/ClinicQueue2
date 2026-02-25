@@ -316,7 +316,7 @@ def call_llama(user_message: str, history: list) -> dict:
         logger.info(f"[OLLAMA] Sending to {OLLAMA_MODEL}: {user_message}")
 
         response = requests.post(
-            "http://localhost:11435/api/chat",
+            "http://localhost:11434/api/chat",
             json={
                 "model": OLLAMA_MODEL,
                 "messages": messages,

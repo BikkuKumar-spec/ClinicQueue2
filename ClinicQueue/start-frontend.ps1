@@ -4,4 +4,4 @@ Write-Host "Dashboard will open at http://localhost:5173" -ForegroundColor Yello
 Write-Host ""
 
 Set-Location frontend
-npm run dev
+cmd.exe /c "npm run dev"

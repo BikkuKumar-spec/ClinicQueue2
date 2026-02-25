@@ -343,7 +343,17 @@ namespace ClinicQueue.Services
                             await _metaService.SendTextMessageAsync(phoneNumber, display.ReplyMessage);
                             return await CompleteBooking(phoneNumber, data);
                         }
-                        // Fallthrough to standard reply if missing info
+                        
+                        // If AI hallucinated a Booking_Confirmed but the slot isn't really valid, we need to interrupt its display message and ask for a valid slot instead
+                        if (data.SelectedSlot == null && !string.IsNullOrEmpty(english.ExtractedEntities.PreferredTime))
+                        {
+                            var overrideMsg = await T($"I'm sorry, the time {english.ExtractedEntities.PreferredTime} is not available for {data.DoctorName}. Please choose another time from the available slots.", lang);
+                            await _metaService.SendTextMessageAsync(phoneNumber, overrideMsg);
+                            _sessions.Set(phoneNumber, "CONVERSATIONAL", data);
+                            return "CONVERSATIONAL_HALLUCINATION_OVERRIDE";
+                        }
+
+                        // Fallthrough to standard reply if missing info but no obvious hallucination
                         goto default;
 
                     default:
@@ -430,7 +440,23 @@ namespace ClinicQueue.Services
                 var timeStr = $"{data.SelectedDate.Value:yyyy-MM-dd} {entities.PreferredTime}";
                 if (DateTime.TryParse(timeStr, out var selectedTime))
                 {
-                    data.SelectedSlot = new SlotDto { Time = selectedTime, IsAvailable = true };
+                    // MUST validate against real availability to prevent LLM hallucinations
+                    var realAvailableSlots = await _appointmentService.GetAvailableSlotsAsync(data.SelectedDate.Value, data.DoctorName);
+                    var validSlot = realAvailableSlots.FirstOrDefault(s => s.Time == selectedTime && s.IsAvailable);
+
+                    if (validSlot != null)
+                    {
+                        data.SelectedSlot = validSlot;
+                    }
+                    else
+                    {
+                        // The LLM hallucinated a time or picked a booked time, reject it
+                        Console.WriteLine($"[SECURITY] LLM hallucinated or picked unavailable time: {selectedTime}");
+                        data.SelectedSlot = null;
+                        
+                        // If they had a slot but now it's invalid, we probably want to clear PreferredTime so they are asked again
+                        // Although this mutates the incoming entity, we just leave it naturally so next turn the Bot asks for time again.
+                    }
                 }
             }
         }

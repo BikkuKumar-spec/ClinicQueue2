@@ -65,7 +65,7 @@ namespace ClinicQueue.Services
             };
 
             await connection.ExecuteAsync(@"
-                INSERT OR IGNORE INTO queue (id, appointment_id, priority_score, status, position, created_at, updated_at)
+                INSERT IGNORE INTO queue (id, appointment_id, priority_score, status, position, created_at, updated_at)
                 VALUES (@Id, @AppointmentId, @PriorityScore, @Status, @Position, @CreatedAt, @UpdatedAt)",
                 queueEntry
             );
@@ -107,7 +107,7 @@ namespace ClinicQueue.Services
                     
                     // Track this notification
                     await connection.ExecuteAsync(@"
-                        INSERT OR REPLACE INTO queue_position_history (appointment_id, last_notified_position, last_notification_time)
+                        REPLACE INTO queue_position_history (appointment_id, last_notified_position, last_notification_time)
                         VALUES (@AppointmentId, @Position, @Time)",
                         new { AppointmentId = appointmentId, Position = entry.Position, Time = DateTime.UtcNow }
                     );
@@ -293,7 +293,7 @@ namespace ClinicQueue.Services
                             
                             // Update notification tracking
                             await connection.ExecuteAsync(@"
-                                INSERT OR REPLACE INTO queue_position_history (appointment_id, last_notified_position, last_notification_time)
+                                REPLACE INTO queue_position_history (appointment_id, last_notified_position, last_notification_time)
                                 VALUES (@AppointmentId, @Position, @Time)",
                                 new { AppointmentId = entry.AppointmentId, Position = newNotifiedPosition, Time = DateTime.UtcNow }
                             );

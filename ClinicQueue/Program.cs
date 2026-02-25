@@ -44,8 +44,11 @@ builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 builder.Services.AddSignalR();
 
+var mySqlConnection = builder.Configuration.GetConnectionString("MySQLConnection")
+    ?? "Server=localhost;Database=clinic_queue;Uid=root;Pwd=;";
+
 // Database
-builder.Services.AddSingleton(new DatabaseService(connectionString));
+builder.Services.AddSingleton(new DatabaseService(mySqlConnection));
 
 // Meta WhatsApp Service
 builder.Services.AddHttpClient();

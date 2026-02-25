@@ -38,6 +38,7 @@ ollama pull llama3.1
 5. Run the service:
    ```powershell
    python main.py
+   uvicorn main:app --reload --port 8000
    ```
    *(The service usually runs on http://localhost:8000)*
 

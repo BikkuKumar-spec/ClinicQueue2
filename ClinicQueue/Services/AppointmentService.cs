@@ -47,11 +47,12 @@ namespace ClinicQueue.Services
 
         public async Task<Appointment> CreateAsync(CreateAppointmentRequest request)
         {
-            // Get or create patient (shared phone allowed, distinct records created/retrieved by service)
+            // Get or create patient
             var patient = await _patientService.GetOrCreateByPhoneAsync(request.PatientName, request.PhoneNumber);
 
             var appointment = new Appointment
             {
+                Id = Guid.NewGuid().ToString(),
                 PatientId = patient.Id,
                 PatientName = request.PatientName.ToProperCase(),
                 SlotTime = request.SlotTime,
@@ -61,49 +62,80 @@ namespace ClinicQueue.Services
             };
 
             using var connection = _db.GetConnection();
-            using var transaction = connection.BeginTransaction();
+            using var transaction = connection.BeginTransaction(System.Data.IsolationLevel.Serializable);
             
             try
             {
-                // Check batch capacity (max 5 per 30-minute batch)
-                var batchStart = new DateTime(
-                    request.SlotTime.Year,
-                    request.SlotTime.Month,
-                    request.SlotTime.Day,
-                    request.SlotTime.Hour,
-                    (request.SlotTime.Minute / 30) * 30, // Round down to nearest 30 min
-                    0
-                );
-                var batchEnd = batchStart.AddMinutes(30);
-                
-                var bookingsInBatch = await connection.ExecuteScalarAsync<int>(@"
-                    SELECT COUNT(*) FROM appointments 
-                    WHERE strftime('%Y-%m-%d %H:%M', slot_time) >= strftime('%Y-%m-%d %H:%M', @BatchStart)
-                    AND strftime('%Y-%m-%d %H:%M', slot_time) < strftime('%Y-%m-%d %H:%M', @BatchEnd)
-                    AND doctor_name = @DoctorName
-                    AND status != 'CANCELLED' AND status != 'NO_SHOW'",
-                    new { BatchStart = batchStart, BatchEnd = batchEnd, DoctorName = request.DoctorName },
-                    transaction
-                );
+                // 1. Resolve Doctor ID from Name
+                var doctorId = await connection.ExecuteScalarAsync<int?>(@"
+                    SELECT id FROM doctors WHERE name = @DoctorName AND is_active = 1 LIMIT 1",
+                    new { DoctorName = appointment.DoctorName }, transaction);
 
-                if (bookingsInBatch >= 5)
+                if (!doctorId.HasValue)
                 {
-                    throw new InvalidOperationException($"Sorry, the {batchStart:hh:mm tt}-{batchEnd:hh:mm tt} batch is full. Please select another time slot.");
+                    throw new InvalidOperationException($"Doctor {appointment.DoctorName} not found or inactive.");
                 }
-                
+
+                int dayOfWeek = (int)request.SlotTime.DayOfWeek;
+                var slotTimeStr = request.SlotTime.ToString("HH:mm:ss");
+
+                // 2. Lock the schedule and verify slot validity
+                var schedule = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+                    SELECT start_time, end_time, slot_duration_minutes, max_patients_per_slot 
+                    FROM schedules 
+                    WHERE doctor_id = @DoctorId AND day_of_week = @DayOfWeek
+                    FOR UPDATE",
+                    new { DoctorId = doctorId.Value, DayOfWeek = dayOfWeek }, transaction);
+
+                if (schedule == null)
+                {
+                    throw new InvalidOperationException($"Doctor {appointment.DoctorName} is not scheduled to work on this day.");
+                }
+
+                TimeSpan slotTimeTs = request.SlotTime.TimeOfDay;
+                if (slotTimeTs < schedule.start_time || slotTimeTs >= schedule.end_time)
+                {
+                    throw new InvalidOperationException($"The requested time {request.SlotTime:hh:mm tt} is outside the working hours for {appointment.DoctorName}.");
+                }
+
+                // Verify the requested time aligns with the duration blocks (e.g. 00, 30)
+                var minutesSinceStart = (slotTimeTs - (TimeSpan)schedule.start_time).TotalMinutes;
+                if (minutesSinceStart % schedule.slot_duration_minutes != 0)
+                {
+                    throw new InvalidOperationException($"The requested time {request.SlotTime:hh:mm tt} is not a valid predefined slot interval.");
+                }
+
+                // 3. Count existing active bookings for this exact slot
+                var currentBookings = await connection.ExecuteScalarAsync<int>(@"
+                    SELECT COUNT(*) FROM appointments 
+                    WHERE doctor_name = @DoctorName AND slot_time = @SlotTime 
+                    AND status NOT IN ('CANCELLED', 'NO_SHOW')",
+                    new { DoctorName = appointment.DoctorName, SlotTime = appointment.SlotTime }, transaction);
+
+                if (currentBookings >= schedule.max_patients_per_slot)
+                {
+                    throw new InvalidOperationException($"Sorry, the slot at {appointment.SlotTime:hh:mm tt} is fully booked. Please select another time.");
+                }
+
+                // 4. Check if patient already has a booking at the exact same time
+                var duplicatePatient = await connection.ExecuteScalarAsync<int>(@"
+                    SELECT COUNT(*) FROM appointments 
+                    WHERE patient_id = @PatientId AND slot_time = @SlotTime AND status NOT IN ('CANCELLED', 'NO_SHOW')",
+                    new { PatientId = patient.Id, SlotTime = appointment.SlotTime }, transaction);
+
+                if (duplicatePatient > 0)
+                {
+                    throw new InvalidOperationException($"Patient already has an active appointment exactly at {appointment.SlotTime:hh:mm tt}.");
+                }
+
                 await connection.ExecuteAsync(@"
-                    INSERT INTO appointments (id, patient_id, patient_name, slot_time, status, doctor_name, specialty, created_at, updated_at)
-                    VALUES (@Id, @PatientId, @PatientName, @SlotTime, @Status, @DoctorName, @Specialty, @CreatedAt, @UpdatedAt)",
-                    appointment,
-                    transaction
-                );
+                    INSERT INTO appointments (id, patient_id, patient_name, slot_time, status, doctor_name, specialty, created_at)
+                    VALUES (@Id, @PatientId, @PatientName, @SlotTime, @Status, @DoctorName, @Specialty, UTC_TIMESTAMP())",
+                    appointment, transaction);
 
                 transaction.Commit();
                 
-                // Post-commit actions
-                // Link symptom analysis if it exists in the session (handled by caller passing request.SymptomAnalysisId if needed, but for now we follow the session)
                 await LinkSymptomAnalysisAsync(appointment.Id, patient.Id);
-                
                 await _reminderService.ScheduleReminderAsync(appointment.Id, appointment.SlotTime);
                 await _hubContext.Clients.All.SendAsync("SlotBooked");
                 
@@ -154,45 +186,66 @@ namespace ClinicQueue.Services
 
         public async Task<List<SlotDto>> GetAvailableSlotsAsync(DateTime targetDate, string doctorName)
         {
-            var now = DateTime.Now; // Server time
-            
-            // Clinic Hours: 9 AM to 6 PM
-            var startTime = targetDate.Date.AddHours(9);
-            var endTime = targetDate.Date.AddHours(18);
-
+            var now = DateTime.Now;
             var slots = new List<SlotDto>();
-            var currentBatch = startTime;
-
             using var connection = _db.GetConnection();
-            
-            while (currentBatch < endTime)
-            {
-                // BLOCK PAST SLOTS (at least 5 mins in future)
-                bool isFuture = currentBatch > now.AddMinutes(5);
-                bool shouldInclude = targetDate > now.Date || isFuture;
-                
-                if (shouldInclude)
-                {
-                    var bookingsInBatch = await connection.ExecuteScalarAsync<int>(@"
-                        SELECT COUNT(*) FROM appointments 
-                        WHERE strftime('%Y-%m-%d %H:%M', slot_time) >= strftime('%Y-%m-%d %H:%M', @BatchStart)
-                        AND strftime('%Y-%m-%d %H:%M', slot_time) < strftime('%Y-%m-%d %H:%M', @BatchEnd)
-                        AND doctor_name = @DoctorName
-                        AND status != 'CANCELLED' AND status != 'NO_SHOW'",
-                        new { BatchStart = currentBatch, BatchEnd = currentBatch.AddMinutes(30), DoctorName = doctorName }
-                    );
 
+            var doctorId = await connection.ExecuteScalarAsync<int?>(
+                "SELECT id FROM doctors WHERE name = @DoctorName AND is_active = 1 LIMIT 1",
+                new { DoctorName = doctorName }
+            );
+
+            if (!doctorId.HasValue) return slots;
+
+            int dayOfWeek = (int)targetDate.DayOfWeek;
+
+            var schedule = await connection.QueryFirstOrDefaultAsync<dynamic>(@"
+                SELECT start_time, end_time, slot_duration_minutes, max_patients_per_slot 
+                FROM schedules 
+                WHERE doctor_id = @DoctorId AND day_of_week = @DayOfWeek",
+                new { DoctorId = doctorId.Value, DayOfWeek = dayOfWeek }
+            );
+
+            if (schedule == null) return slots; // Doctor does not work on this day
+
+            // Fetch actual active bookings for the doctor exactly on that day
+            var bookingsInfo = await connection.QueryAsync<DateTime>(@"
+                SELECT slot_time FROM appointments 
+                WHERE doctor_name = @DoctorName 
+                AND DATE(slot_time) = DATE(@TargetDate) 
+                AND status NOT IN ('CANCELLED', 'NO_SHOW')",
+                new { DoctorName = doctorName, TargetDate = targetDate.Date }
+            );
+
+            var bookingCountsBySlot = bookingsInfo
+                .GroupBy(b => b)
+                .ToDictionary(g => g.Key, g => g.Count());
+
+            var currentSlotTs = (TimeSpan)schedule.start_time;
+            var endTimeTs = (TimeSpan)schedule.end_time;
+            var durationMins = (int)schedule.slot_duration_minutes;
+            var maxPatients = (int)schedule.max_patients_per_slot;
+
+            while (currentSlotTs < endTimeTs)
+            {
+                var slotDateTime = targetDate.Date.Add(currentSlotTs);
+                
+                // Allow slots at least 5 mins in the future
+                if (slotDateTime > now.AddMinutes(5))
+                {
+                    int currentBookings = bookingCountsBySlot.TryGetValue(slotDateTime, out var count) ? count : 0;
+                    
                     slots.Add(new SlotDto
                     {
-                        Time = currentBatch,
-                        BatchStartTime = currentBatch,
-                        BookingsInBatch = bookingsInBatch,
-                        IsAvailable = bookingsInBatch < 5,
-                        MaxBookingsPerBatch = 5
+                        Time = slotDateTime,
+                        BatchStartTime = slotDateTime,
+                        BookingsInBatch = currentBookings,
+                        IsAvailable = currentBookings < maxPatients,
+                        MaxBookingsPerBatch = maxPatients
                     });
                 }
 
-                currentBatch = currentBatch.AddMinutes(30);
+                currentSlotTs = currentSlotTs.Add(TimeSpan.FromMinutes(durationMins));
             }
 
             return slots;
@@ -295,8 +348,6 @@ namespace ClinicQueue.Services
         public async Task<List<DashboardSlotDto>> GetDashboardSlotsAsync(DateTime? date = null, string? specialty = null, string? doctorName = null)
         {
             var targetDate = date ?? DateTime.Today;
-            var startTime = targetDate.AddHours(9);
-            var endTime = targetDate.AddHours(18);
 
             using var connection = _db.GetConnection();
             
@@ -316,7 +367,7 @@ namespace ClinicQueue.Services
                 FROM appointments a
                 JOIN patients p ON a.patient_id = p.id
                 LEFT JOIN symptom_analyses sa ON a.id = sa.appointment_id
-                WHERE date(a.slot_time) = date(@TargetDate)
+                WHERE DATE(a.slot_time) = DATE(@TargetDate)
                 AND a.status != 'CANCELLED'";
 
             if (!string.IsNullOrEmpty(specialty))
@@ -335,6 +386,11 @@ namespace ClinicQueue.Services
             );
 
             var result = new List<DashboardSlotDto>();
+            
+            // To group properly, we get the earliest and latest slot, or default 9-6 if none
+            var startTime = targetDate.AddHours(9);
+            var endTime = targetDate.AddHours(18);
+
             var currentBatch = startTime;
 
             while (currentBatch < endTime)

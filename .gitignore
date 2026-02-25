@@ -1,2 +1,9 @@
-.idea/
+# Virtual environment
 venv/
+TranslationService/venv/
+
+# Python cache
+__pycache__/
+*.pyc
+
+.idea/

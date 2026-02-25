@@ -1,4 +1,4 @@
-using Microsoft.Data.Sqlite;
+using MySqlConnector;
 using Dapper;
 
 namespace ClinicQueue.Data
@@ -10,14 +10,26 @@ namespace ClinicQueue.Data
         public DatabaseService(string connectionString)
         {
             _connectionString = connectionString;
+            CreateDatabaseIfNotExists();
             InitializeDatabase();
         }
 
-        public SqliteConnection GetConnection()
+        public MySqlConnection GetConnection()
         {
-            var connection = new SqliteConnection(_connectionString);
+            var connection = new MySqlConnection(_connectionString);
             connection.Open();
             return connection;
+        }
+
+        private void CreateDatabaseIfNotExists()
+        {
+            var builder = new MySqlConnectionStringBuilder(_connectionString);
+            var databaseName = builder.Database;
+            builder.Database = null; // connect without database to create it
+
+            using var connection = new MySqlConnection(builder.ToString());
+            connection.Open();
+            connection.Execute($"CREATE DATABASE IF NOT EXISTS `{databaseName}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;");
         }
 
         private void InitializeDatabase()
@@ -27,68 +39,103 @@ namespace ClinicQueue.Data
             // Create Patients table
             connection.Execute(@"
                 CREATE TABLE IF NOT EXISTS patients (
-                    id TEXT PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    phone_number TEXT UNIQUE NOT NULL,
+                    id VARCHAR(50) PRIMARY KEY,
+                    name VARCHAR(255) NOT NULL,
+                    phone_number VARCHAR(20) UNIQUE NOT NULL,
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                     last_visit DATETIME
                 )
             ");
 
-            // Create Appointments table
+            // Create Specialties table first since Doctors depends on it
             connection.Execute(@"
-                CREATE TABLE IF NOT EXISTS appointments (
-                    id TEXT PRIMARY KEY,
-                    patient_id TEXT NOT NULL,
-                    slot_time DATETIME NOT NULL,
-                    status TEXT NOT NULL DEFAULT 'BOOKED',
-                    patient_name TEXT,
-                    doctor_name TEXT,
-                    specialty TEXT,
-                    queue_position INTEGER,
-                    reminder_sent INTEGER DEFAULT 0,
-                    expected_to_arrive INTEGER DEFAULT 0,
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (patient_id) REFERENCES patients(id)
+                CREATE TABLE IF NOT EXISTS specialties (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    name VARCHAR(100) UNIQUE NOT NULL,
+                    description TEXT,
+                    is_active BOOLEAN DEFAULT TRUE
                 )
             ");
 
+            // Create Doctors table
             connection.Execute(@"
-                CREATE INDEX IF NOT EXISTS idx_appointments_slot ON appointments(slot_time)
+                CREATE TABLE IF NOT EXISTS doctors (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    name VARCHAR(100) UNIQUE NOT NULL,
+                    specialty_id INT,
+                    description TEXT,
+                    is_active BOOLEAN DEFAULT TRUE,
+                    status INT DEFAULT 0,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    FOREIGN KEY (specialty_id) REFERENCES specialties(id)
+                )
             ");
 
+            // Create Schedules table for Doctors
             connection.Execute(@"
-                CREATE INDEX IF NOT EXISTS idx_appointments_status ON appointments(status)
+                CREATE TABLE IF NOT EXISTS schedules (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    doctor_id INT NOT NULL,
+                    day_of_week INT NOT NULL,
+                    start_time TIME NOT NULL,
+                    end_time TIME NOT NULL,
+                    slot_duration_minutes INT DEFAULT 30,
+                    max_patients_per_slot INT DEFAULT 5,
+                    FOREIGN KEY (doctor_id) REFERENCES doctors(id),
+                    UNIQUE KEY unique_doc_day (doctor_id, day_of_week)
+                )
             ");
+
+            // Create Bookings/Appointments table
+            connection.Execute(@"
+                CREATE TABLE IF NOT EXISTS appointments (
+                    id VARCHAR(50) PRIMARY KEY,
+                    patient_id VARCHAR(50) NOT NULL,
+                    slot_time DATETIME NOT NULL,
+                    status ENUM('BOOKED', 'ARRIVED', 'IN_QUEUE', 'IN_CONSULTATION', 'COMPLETED', 'CANCELLED', 'NO_SHOW') DEFAULT 'BOOKED',
+                    patient_name VARCHAR(255),
+                    doctor_name VARCHAR(100),
+                    specialty VARCHAR(100),
+                    queue_position INT,
+                    reminder_sent BOOLEAN DEFAULT FALSE,
+                    expected_to_arrive BOOLEAN DEFAULT FALSE,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    FOREIGN KEY (patient_id) REFERENCES patients(id),
+                    INDEX idx_appointments_slot (slot_time),
+                    INDEX idx_appointments_status (status)
+                )
+            ");
+
+
 
             // Create Queue table
             connection.Execute(@"
                 CREATE TABLE IF NOT EXISTS queue (
-                    id TEXT PRIMARY KEY,
-                    appointment_id TEXT UNIQUE NOT NULL,
-                    position INTEGER NOT NULL,
-                    priority_score INTEGER NOT NULL,
-                    status TEXT DEFAULT 'IN_QUEUE',
+                    id VARCHAR(50) PRIMARY KEY,
+                    appointment_id VARCHAR(50) UNIQUE NOT NULL,
+                    position INT NOT NULL,
+                    priority_score INT NOT NULL,
+                    status VARCHAR(50) DEFAULT 'IN_QUEUE',
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (appointment_id) REFERENCES appointments(id)
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    FOREIGN KEY (appointment_id) REFERENCES appointments(id),
+                    INDEX idx_queue_priority (priority_score)
                 )
             ");
 
-            connection.Execute(@"
-                CREATE INDEX IF NOT EXISTS idx_queue_priority ON queue(priority_score)
-            ");
+
 
             // Create Notification Log table
             connection.Execute(@"
                 CREATE TABLE IF NOT EXISTS notification_log (
-                    id TEXT PRIMARY KEY,
-                    appointment_id TEXT,
-                    phone TEXT NOT NULL,
+                    id VARCHAR(50) PRIMARY KEY,
+                    appointment_id VARCHAR(50),
+                    phone VARCHAR(20) NOT NULL,
                     message TEXT NOT NULL,
-                    template TEXT,
-                    status TEXT DEFAULT 'pending',
+                    template VARCHAR(100),
+                    status VARCHAR(50) DEFAULT 'pending',
                     sent_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (appointment_id) REFERENCES appointments(id)
                 )
@@ -97,11 +144,11 @@ namespace ClinicQueue.Data
             // Create Queue Position History table (for notification tracking)
             connection.Execute(@"
                 CREATE TABLE IF NOT EXISTS queue_position_history (
-                    appointment_id TEXT PRIMARY KEY,
-                    last_notified_position INTEGER NOT NULL,
+                    appointment_id VARCHAR(50) PRIMARY KEY,
+                    last_notified_position INT NOT NULL,
                     last_notification_time DATETIME NOT NULL,
-                    next_in_queue_notified INTEGER DEFAULT 0,
-                    arrival_reminder_sent INTEGER DEFAULT 0,
+                    next_in_queue_notified BOOLEAN DEFAULT FALSE,
+                    arrival_reminder_sent BOOLEAN DEFAULT FALSE,
                     FOREIGN KEY (appointment_id) REFERENCES appointments(id)
                 )
             ");
@@ -109,18 +156,18 @@ namespace ClinicQueue.Data
             // Create Symptom Analyses table
             connection.Execute(@"
                 CREATE TABLE IF NOT EXISTS symptom_analyses (
-                    id TEXT PRIMARY KEY,
-                    patient_id TEXT NOT NULL,
-                    appointment_id TEXT,
+                    id VARCHAR(50) PRIMARY KEY,
+                    patient_id VARCHAR(50) NOT NULL,
+                    appointment_id VARCHAR(50),
                     original_symptoms TEXT NOT NULL,
                     translated_symptoms TEXT,
-                    recommended_specialty TEXT NOT NULL,
-                    severity TEXT NOT NULL,
+                    recommended_specialty VARCHAR(100) NOT NULL,
+                    severity VARCHAR(50) NOT NULL,
                     ai_reasoning TEXT,
-                    detected_language TEXT NOT NULL,
-                    intent TEXT DEFAULT 'Other',
+                    detected_language VARCHAR(50) NOT NULL,
+                    intent VARCHAR(50) DEFAULT 'Other',
                     normalized_english TEXT,
-                    confidence REAL DEFAULT 0.0,
+                    confidence DOUBLE DEFAULT 0.0,
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (patient_id) REFERENCES patients(id),
                     FOREIGN KEY (appointment_id) REFERENCES appointments(id)
@@ -130,65 +177,22 @@ namespace ClinicQueue.Data
             // Run migrations
             RunMigrations(connection);
         }
-        
-        private void RunMigrations(SqliteConnection connection)
+
+        private void RunMigrations(MySqlConnection connection)
         {
-            // Migration 1: Add PatientName, ReminderSent, ExpectedToArrive, DoctorName to appointments
-            AddColumnIfNotExists(connection, "appointments", "patient_name", "TEXT");
-            AddColumnIfNotExists(connection, "appointments", "reminder_sent", "INTEGER DEFAULT 0");
-            AddColumnIfNotExists(connection, "appointments", "expected_to_arrive", "INTEGER DEFAULT 0");
-            AddColumnIfNotExists(connection, "appointments", "doctor_name", "TEXT");
-            AddColumnIfNotExists(connection, "appointments", "specialty", "TEXT");
-            
-            // Create index for reminder queries
-            // Create index for reminder queries
+            // Seed default specialties (IGNORE to be idempotent)
             connection.Execute(@"
-                CREATE INDEX IF NOT EXISTS idx_appointments_reminder 
-                ON appointments(slot_time, status, reminder_sent) 
-                WHERE status = 'BOOKED' AND reminder_sent = 0
-            ");
-            
-            // Migration 2: Add intent, normalized_english, confidence to symptom_analyses
-            AddColumnIfNotExists(connection, "symptom_analyses", "intent", "TEXT DEFAULT 'Other'");
-            AddColumnIfNotExists(connection, "symptom_analyses", "normalized_english", "TEXT");
-            AddColumnIfNotExists(connection, "symptom_analyses", "confidence", "REAL DEFAULT 0.0");
-
-            // Migration 3: Ensure specialties + doctors tables exist (created in earlier migration)
-            connection.Execute(@"
-                CREATE TABLE IF NOT EXISTS specialties (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT UNIQUE NOT NULL,
-                    description TEXT,
-                    is_active INTEGER DEFAULT 1
-                )
-            ");
-
-            connection.Execute(@"
-                CREATE TABLE IF NOT EXISTS doctors (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT UNIQUE NOT NULL,
-                    specialty_id INTEGER,
-                    description TEXT,
-                    is_active INTEGER DEFAULT 1,
-                    status INTEGER DEFAULT 0,
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (specialty_id) REFERENCES specialties(id)
-                )
-            ");
-
-            // Migration 4: Seed default specialties (INSERT OR IGNORE = idempotent)
-            connection.Execute(@"
-                INSERT OR IGNORE INTO specialties (name, description) VALUES
+                INSERT IGNORE INTO specialties (name, description) VALUES
                     ('General Physician',  'General medicine and common illnesses'),
                     ('Dermatologist',      'Skin, hair and nail conditions'),
                     ('Pediatrician',       'Child health specialist'),
                     ('Orthopedist',        'Bone and joint specialist'),
-                    ('ENT Specialist',     'Ear, Nose and Throat specialist')
+                    ('ENT Specialist',     'Ear, Nose and Throat specialist'),
+                    ('Ophthalmologist',    'Eye specialist'),
+                    ('Cardiologist',       'Heart specialist'),
+                    ('Pulmonologist',      'Lung specialist')
             ");
 
-            // Migration 5: Seed Dr. Suresh and Dr. Mukesh under General Physician
-            // Only inserts if NO doctor exists for General Physician — never duplicates
             var gpDoctorCount = connection.ExecuteScalar<int>(@"
                 SELECT COUNT(*) FROM doctors d
                 JOIN specialties s ON d.specialty_id = s.id
@@ -197,43 +201,52 @@ namespace ClinicQueue.Data
 
             if (gpDoctorCount == 0)
             {
-                Console.WriteLine("[DB] Seeding General Physician doctors: Dr. Suresh, Dr. Mukesh");
+                Console.WriteLine("[DB] Seeding General Physician doctors: Dr. Sharma, Dr. Verma");
                 connection.Execute(@"
-                    INSERT OR IGNORE INTO doctors (name, specialty_id, description, is_active) 
-                    SELECT 'Dr. Suresh', s.id, 'Senior General Physician', 1
+                    INSERT IGNORE INTO doctors (name, specialty_id, description, is_active) 
+                    SELECT 'Dr. Sharma', s.id, 'Senior General Physician', 1
                     FROM specialties s WHERE s.name = 'General Physician';
 
-                    INSERT OR IGNORE INTO doctors (name, specialty_id, description, is_active)
-                    SELECT 'Dr. Mukesh', s.id, 'General Practitioner', 1
+                    INSERT IGNORE INTO doctors (name, specialty_id, description, is_active)
+                    SELECT 'Dr. Verma', s.id, 'General Practitioner', 1
                     FROM specialties s WHERE s.name = 'General Physician';
                 ");
             }
 
-            // Migration 6: Seed 2 doctors for each remaining specialty
-            // Each block only inserts if that specialty currently has zero doctors
             SeedSpecialtyDoctors(connection, "Dermatologist",
-                ("Dr. Akash", "Senior Dermatologist"),
+                ("Dr. Mehta", "Senior Dermatologist"),
                 ("Dr. Ajay",  "Skin & Hair Specialist"));
 
             SeedSpecialtyDoctors(connection, "Pediatrician",
-                ("Dr. Beena", "Child Health Specialist"),
+                ("Dr. Gupta", "Child Health Specialist"),
                 ("Dr. Kavya", "Senior Pediatrician"));
 
             SeedSpecialtyDoctors(connection, "Orthopedist",
-                ("Dr. Raj",   "Bone & Joint Surgeon"),
-                ("Dr. Kumar", "Sports Medicine Specialist"));
+                ("Dr. Rao",   "Bone & Joint Surgeon"),
+                ("Dr. Kumar", "Sports Medicine"));
 
             SeedSpecialtyDoctors(connection, "ENT Specialist",
-                ("Dr. Priya", "ENT Surgeon"),
-                ("Dr. Anil",  "Ear, Nose & Throat Specialist"));
+                ("Dr. Singh", "ENT Surgeon"),
+                ("Dr. Anil",  "Ear, Nose & Throat"));
+                
+            SeedSpecialtyDoctors(connection, "Ophthalmologist",
+                ("Dr. Kapoor", "Eye Surgeon"),
+                ("Dr. Joshi", "Vision Specialist"));
+                
+            SeedSpecialtyDoctors(connection, "Cardiologist",
+                ("Dr. Desai", "Heart Specialist"),
+                ("Dr. Patil", "Cardiovascular Surgeon"));
+
+            SeedSpecialtyDoctors(connection, "Pulmonologist",
+                ("Dr. Iyer", "Lung Specialist"),
+                ("Dr. Nair", "Respiratory Specialist"));
+                
+            SeedDoctorSchedules(connection);
+            SeedDummyBookings(connection);
         }
 
-        /// <summary>
-        /// Idempotent helper — seeds exactly two doctors under <paramref name="specialtyName"/>
-        /// only when that specialty currently has zero active doctors.
-        /// </summary>
         private void SeedSpecialtyDoctors(
-            SqliteConnection connection,
+            MySqlConnection connection,
             string specialtyName,
             (string Name, string Description) doc1,
             (string Name, string Description) doc2)
@@ -243,13 +256,13 @@ namespace ClinicQueue.Data
                 JOIN specialties s ON d.specialty_id = s.id
                 WHERE s.name = @name AND d.is_active = 1", new { name = specialtyName });
 
-            if (count == 0)
+            if (count == 0 || count == 1)
             {
                 Console.WriteLine($"[DB] Seeding {specialtyName} doctors: {doc1.Name}, {doc2.Name}");
                 connection.Execute(@"
-                    INSERT OR IGNORE INTO doctors (name, specialty_id, description, is_active)
+                    INSERT IGNORE INTO doctors (name, specialty_id, description, is_active)
                     SELECT @name1, s.id, @desc1, 1 FROM specialties s WHERE s.name = @spec;
-                    INSERT OR IGNORE INTO doctors (name, specialty_id, description, is_active)
+                    INSERT IGNORE INTO doctors (name, specialty_id, description, is_active)
                     SELECT @name2, s.id, @desc2, 1 FROM specialties s WHERE s.name = @spec;",
                     new { name1 = doc1.Name, desc1 = doc1.Description,
                           name2 = doc2.Name, desc2 = doc2.Description,
@@ -257,16 +270,74 @@ namespace ClinicQueue.Data
             }
         }
         
-        private void AddColumnIfNotExists(SqliteConnection connection, string table, string column, string type)
-        {            
-            // Reliable way to check columns in SQLite
-            var columns = connection.Query<dynamic>($"PRAGMA table_info({table})");
-            var columnExists = columns.Any(c => ((string)c.name).Equals(column, StringComparison.OrdinalIgnoreCase));
-            
-            if (!columnExists)
+        private void SeedDoctorSchedules(MySqlConnection connection)
+        {
+            var scheduledCount = connection.ExecuteScalar<int>("SELECT COUNT(*) FROM schedules");
+            if (scheduledCount == 0)
             {
-                Console.WriteLine($"[DB] Migration: Adding column {column} to table {table}");
-                connection.Execute($"ALTER TABLE {table} ADD COLUMN {column} {type}");
+                Console.WriteLine("[DB] Seeding schedules for ALL doctors (Mon-Sat, 9AM-6PM)");
+                // Create a schedule for each existing doctor for Mon-Sat (1 to 6)
+                connection.Execute(@"
+                    INSERT IGNORE INTO schedules (doctor_id, day_of_week, start_time, end_time, slot_duration_minutes, max_patients_per_slot)
+                    SELECT id, d.day_of_week, '09:00:00', '18:00:00', 30, 5
+                    FROM doctors
+                    CROSS JOIN (
+                        SELECT 1 as day_of_week UNION ALL
+                        SELECT 2 UNION ALL
+                        SELECT 3 UNION ALL
+                        SELECT 4 UNION ALL
+                        SELECT 5 UNION ALL
+                        SELECT 6
+                    ) d
+                ");
+            }
+        }
+
+        private void SeedDummyBookings(MySqlConnection connection)
+        {
+            var patientCount = connection.ExecuteScalar<int>("SELECT COUNT(*) FROM patients");
+            if (patientCount == 0)
+            {
+                Console.WriteLine("[DB] Seeding dummy patients and appointments for testing...");
+                
+                // 1. Insert dummy patients
+                var p1Id = Guid.NewGuid().ToString();
+                var p2Id = Guid.NewGuid().ToString();
+                
+                connection.Execute(@"
+                    INSERT IGNORE INTO patients (id, name, phone_number) VALUES 
+                    (@Id1, 'Rahul Kumar', '919876543210'),
+                    (@Id2, 'Priya Singh', '919876543211')",
+                    new { Id1 = p1Id, Id2 = p2Id });
+
+                // 2. Find Dr. Sharma
+                var sharmaId = connection.ExecuteScalar<int?>("SELECT id FROM doctors WHERE name = 'Dr. Sharma' LIMIT 1");
+                var vermaId = connection.ExecuteScalar<int?>("SELECT id FROM doctors WHERE name = 'Dr. Verma' LIMIT 1");
+
+                if (sharmaId.HasValue)
+                {
+                    // Create appointments for today, 10 AM and 11 AM
+                    var today = DateTime.Today;
+                    var t1 = today.AddHours(10);
+                    var t2 = today.AddHours(11);
+                    
+                    var apt1 = Guid.NewGuid().ToString();
+                    var apt2 = Guid.NewGuid().ToString();
+
+                    connection.Execute(@"
+                        INSERT IGNORE INTO appointments (id, patient_id, slot_time, status, patient_name, doctor_name, specialty)
+                        VALUES 
+                        (@A1, @P1, @T1, 'BOOKED', 'Rahul Kumar', 'Dr. Sharma', 'General Physician'),
+                        (@A2, @P2, @T2, 'ARRIVED', 'Priya Singh', 'Dr. Sharma', 'General Physician')",
+                        new { A1 = apt1, P1 = p1Id, T1 = t1, A2 = apt2, P2 = p2Id, T2 = t2 });
+
+                    // Add to queue for Priya (status ARRIVED -> IN_QUEUE usually)
+                    connection.Execute(@"
+                        UPDATE appointments SET status = 'IN_QUEUE' WHERE id = @A2;
+                        INSERT IGNORE INTO queue (id, appointment_id, position, priority_score, status)
+                        VALUES (@Qid, @A2, 1, 100, 'IN_QUEUE')",
+                        new { A2 = apt2, Qid = Guid.NewGuid().ToString() });
+                }
             }
         }
     }
