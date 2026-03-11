@@ -22,6 +22,9 @@ namespace ClinicQueue.Services
         private readonly DatabaseService _db;
         private readonly ITranslationService _translator;
         private readonly BotSessionStore _sessions;
+        private readonly IWhatsAppMediaService _mediaService;
+        private readonly IPdfExtractionService _pdfService;
+        private readonly IReportSummaryService _summaryService;
 
         public WhatsAppBotService(
             IAppointmentService appointmentService,
@@ -32,7 +35,10 @@ namespace ClinicQueue.Services
             IAISymptomService aiService,
             DatabaseService db,
             ITranslationService translator,
-            BotSessionStore sessions)
+            BotSessionStore sessions,
+            IWhatsAppMediaService mediaService,
+            IPdfExtractionService pdfService,
+            IReportSummaryService summaryService)
         {
             _appointmentService = appointmentService;
             _patientService = patientService;
@@ -43,6 +49,9 @@ namespace ClinicQueue.Services
             _db = db;
             _translator = translator;
             _sessions = sessions;
+            _mediaService = mediaService;
+            _pdfService = pdfService;
+            _summaryService = summaryService;
         }
 
         public class BookingSession
@@ -61,6 +70,28 @@ namespace ClinicQueue.Services
             public string? Duration { get; set; }
             public int SeverityScore { get; set; }
             public string? AdditionalSymptoms { get; set; }
+
+            // ── PDF Upload & Summarization ────────────────────────────────────
+            /// <summary>
+            /// Temporarily holds extracted text from a user-uploaded medical report.
+            /// MUST be nulled out after use (privacy requirement).
+            /// </summary>
+            public string? TempExtractedReportText { get; set; }
+        }
+
+        // ─── Reply Helpers ────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Returns the best reply text from the AI response.
+        /// Prefers reply_message. Falls back to question, then stage if reply_message is empty
+        /// (handles cases when Qwen generates old-schema output).
+        /// </summary>
+        private static string GetReplyText(AiChatResponse r)
+        {
+            if (!string.IsNullOrWhiteSpace(r.ReplyMessage)) return r.ReplyMessage;
+            if (!string.IsNullOrWhiteSpace(r.Question))     return r.Question;
+            if (!string.IsNullOrWhiteSpace(r.Stage))        return r.Stage!;
+            return "I'm sorry, I didn't quite understand that. Could you please rephrase?";
         }
 
         // ─── Translation Helpers ──────────────────────────────────────────────────
@@ -241,6 +272,8 @@ namespace ClinicQueue.Services
             // are list reply IDs — detecting language from these would incorrectly overwrite Hindi with English
             var isRealText = !normalizedInput.StartsWith("BTN_") &&
                              !normalizedInput.StartsWith("REMINDER_") &&
+                             !normalizedInput.StartsWith("PDF_UPLOAD:") &&
+                             !normalizedInput.StartsWith("DOC_UNSUPPORTED") &&
                              !normalizedInput.StartsWith("DR.") &&
                              !System.Text.RegularExpressions.Regex.IsMatch(input.Trim(), @"^\d{4}-\d{2}-\d{2}") &&
                              input.Trim().Length >= 1;
@@ -271,9 +304,25 @@ namespace ClinicQueue.Services
                 await _reminderService.HandleReminderNoAsync(input.Substring("reminder_no_".Length), phoneNumber);
                 return "REMINDER_CANCELLED";
             }
-
+            // ── PRIORITY 2: PDF Document Upload ────────────────────────────────────
+            if (normalizedInput.StartsWith("PDF_UPLOAD:"))
+            {
+                return await HandlePdfUploadAsync(phoneNumber, input.Substring("PDF_UPLOAD:".Length), lang);
+            }
+            if (normalizedInput == "DOC_UNSUPPORTED")
+            {
+                var rejectMsg = await T("📄 I can only process PDF files. Please upload your medical report as a PDF document.", lang);
+                await _metaService.SendTextMessageAsync(phoneNumber, rejectMsg);
+                return "DOC_REJECTED";
+            }
             if (_sessions.TryGet(phoneNumber, out var session))
             {
+                // ── PDF Summary Consent Flow ──────────────────────────────────
+                if (session.State == "Awaiting_Summary_Consent")
+                {
+                    return await HandleSummaryConsentAsync(phoneNumber, input, session.Data, lang);
+                }
+
                 // ✅ Allow universal escape words
                 var isGreeting = normalizedInput is "EXIT" or "CANCEL" or "RESTART" or "MENU"
                                  or "HI" or "HELLO" or "NAMASTE" or "HELO" or "BYE" or "STOP";
@@ -334,14 +383,14 @@ namespace ClinicQueue.Services
                         // Final safety check before actual booking
                         if (data.SelectedDate != null && !string.IsNullOrEmpty(data.DoctorName) && !string.IsNullOrEmpty(data.PatientName) && data.SelectedSlot != null)
                         {
-                            await _metaService.SendTextMessageAsync(phoneNumber, display.ReplyMessage);
+                            await _metaService.SendTextMessageAsync(phoneNumber, GetReplyText(display));
                             return await CompleteBooking(phoneNumber, data);
                         }
                         // Fallthrough to standard reply if missing info
                         goto default;
 
                     default:
-                        await _metaService.SendTextMessageAsync(phoneNumber, display.ReplyMessage);
+                        await _metaService.SendTextMessageAsync(phoneNumber, GetReplyText(display));
                         _sessions.Set(phoneNumber, "CONVERSATIONAL", data);
                         return "CONVERSATIONAL";
                 }
@@ -427,6 +476,121 @@ namespace ClinicQueue.Services
                     data.SelectedSlot = new SlotDto { Time = selectedTime, IsAvailable = true };
                 }
             }
+        }
+
+        // ─── PDF Upload & Summarization ──────────────────────────────────────────
+
+        private async Task<string> HandlePdfUploadAsync(string phoneNumber, string mediaId, string lang)
+        {
+            try
+            {
+                // 1. Download the file bytes from Meta
+                var pdfBytes = await _mediaService.DownloadMediaAsync(mediaId);
+
+                // 2. Extract text using PdfPig
+                var extractedText = _pdfService.ExtractTextFromPdf(pdfBytes);
+
+                if (string.IsNullOrWhiteSpace(extractedText))
+                {
+                    var emptyMsg = await T("📄 I received your document but couldn't extract any readable text from it. The PDF may be image-based or empty. Please try uploading a text-based PDF.", lang);
+                    await _metaService.SendTextMessageAsync(phoneNumber, emptyMsg);
+                    return "PDF_EMPTY";
+                }
+
+                // 3. Save to session and set consent state
+                var data = new BookingSession
+                {
+                    SymptomLanguage = lang,
+                    TempExtractedReportText = extractedText
+                };
+
+                // Preserve existing session data if user was mid-conversation
+                if (_sessions.TryGet(phoneNumber, out var existing))
+                {
+                    existing.Data.TempExtractedReportText = extractedText;
+                    data = existing.Data;
+                }
+
+                _sessions.Set(phoneNumber, "Awaiting_Summary_Consent", data);
+
+                // 4. Ask for consent
+                var consentMsg = await T("📄 I received your medical report! Would you like me to read it and generate a simple summary? (Reply Yes/No)", lang);
+                await _metaService.SendTextMessageAsync(phoneNumber, consentMsg);
+                return "Awaiting_Summary_Consent";
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[PDF ERROR] {ex.Message}");
+                var errorMsg = await T("❌ Sorry, I had trouble processing your document. Please make sure it's a valid PDF file and try again.", lang);
+                await _metaService.SendTextMessageAsync(phoneNumber, errorMsg);
+                return "PDF_ERROR";
+            }
+        }
+
+        private async Task<string> HandleSummaryConsentAsync(string phoneNumber, string input, BookingSession data, string lang)
+        {
+            var normalizedReply = input.Trim().ToUpperInvariant();
+
+            // Accepted affirmatives (English + Hindi/Hinglish)
+            var yesReplies = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                "YES", "Y", "HAAN", "HO", "HA", "JI", "JEE",
+                "हाँ", "हां", "हा", "जी", "जी हाँ"
+            };
+
+            var noReplies = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                "NO", "N", "NAHI", "NEIN", "NAH",
+                "नहीं", "ना", "नही"
+            };
+
+            try
+            {
+                if (yesReplies.Contains(normalizedReply))
+                {
+                    if (string.IsNullOrWhiteSpace(data.TempExtractedReportText))
+                    {
+                        var noDataMsg = await T("⚠️ Sorry, I no longer have your report data. Please upload the PDF again.", lang);
+                        await _metaService.SendTextMessageAsync(phoneNumber, noDataMsg);
+                    }
+                    else
+                    {
+                        var processingMsg = await T("🔍 Analyzing your report... This may take a moment.", lang);
+                        await _metaService.SendTextMessageAsync(phoneNumber, processingMsg);
+
+                        var summary = await _summaryService.GenerateReportSummaryAsync(data.TempExtractedReportText);
+
+                        if (string.IsNullOrWhiteSpace(summary))
+                            summary = "Unable to generate a summary. The report content may not contain standard lab values.";
+
+                        var translatedSummary = await T($"📋 *Report Summary:*\n\n{summary}\n\n⚠️ _This is an AI-generated summary for informational purposes only. Please consult your doctor for medical advice._", lang);
+                        await _metaService.SendTextMessageAsync(phoneNumber, translatedSummary);
+                    }
+                }
+                else if (noReplies.Contains(normalizedReply))
+                {
+                    var declineMsg = await T("👍 Okay, no problem. I have cleared your report from my memory.", lang);
+                    await _metaService.SendTextMessageAsync(phoneNumber, declineMsg);
+                }
+                else
+                {
+                    // User typed something other than yes/no — re-prompt
+                    var repromptMsg = await T("Please reply with *Yes* or *No*. Would you like me to summarize your medical report?", lang);
+                    await _metaService.SendTextMessageAsync(phoneNumber, repromptMsg);
+                    return "Awaiting_Summary_Consent";
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[SUMMARY ERROR] {ex.Message}");
+                var errorMsg = await T("❌ Sorry, I had trouble generating the summary. Please try uploading your report again.", lang);
+                await _metaService.SendTextMessageAsync(phoneNumber, errorMsg);
+            }
+
+            // CRITICAL PRIVACY: Always clear medical data from session, regardless of outcome
+            data.TempExtractedReportText = null;
+            _sessions.Set(phoneNumber, "CONVERSATIONAL", data);
+            return "CONVERSATIONAL";
         }
 
         private async Task<string> CompleteBooking(string phoneNumber, BookingSession data)

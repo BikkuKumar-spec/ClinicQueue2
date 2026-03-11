@@ -70,6 +70,38 @@ builder.Services.AddSingleton<IMetaWhatsAppService>(sp =>
 // ✅ Register BotSessionStore as Singleton so language and session state persists across requests
 builder.Services.AddSingleton<BotSessionStore>();
 
+// PDF Extraction (stateless, lightweight — singleton is fine)
+builder.Services.AddSingleton<IPdfExtractionService, PdfExtractionService>();
+
+// WhatsApp Media Downloader (uses Meta API to download uploaded files)
+builder.Services.AddSingleton<IWhatsAppMediaService>(sp =>
+{
+    var config = builder.Configuration.GetSection("Meta:WhatsApp");
+    var httpClientFactory = sp.GetRequiredService<IHttpClientFactory>();
+    var httpClient = httpClientFactory.CreateClient();
+    var logger = sp.GetRequiredService<ILogger<WhatsAppMediaService>>();
+
+    return new WhatsAppMediaService(
+        httpClient: httpClient,
+        accessToken: config["AccessToken"] ?? "",
+        apiVersion: config["ApiVersion"] ?? "v21.0",
+        logger: logger
+    );
+});
+
+// Report Summarization (calls Ollama/Qwen directly, separate from chatbot AI pipeline)
+builder.Services.AddSingleton<IReportSummaryService>(sp =>
+{
+    var ollamaEndpoint = builder.Configuration["AI:OllamaEndpoint"]
+        ?? "http://localhost:11434/api/generate";
+    var httpClientFactory = sp.GetRequiredService<IHttpClientFactory>();
+    var httpClient = httpClientFactory.CreateClient();
+    httpClient.Timeout = TimeSpan.FromSeconds(180); // Qwen 7B can be slow on CPU
+    var logger = sp.GetRequiredService<ILogger<ReportSummaryService>>();
+
+    return new ReportSummaryService(httpClient, ollamaEndpoint, logger);
+});
+
 // Application Services
 builder.Services.AddScoped<IPatientService, PatientService>();
 builder.Services.AddScoped<IAppointmentService, AppointmentService>();

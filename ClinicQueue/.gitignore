@@ -32,37 +32,46 @@ App_Data/
 ## OS
 .DS_Store
 Thumbs.db
+
 ##################################
 # Node / React / Vite
 ##################################
 
-# Dependencies
 node_modules/
 frontend/node_modules/
 
-# Build output
 dist/
 frontend/dist/
 
-# Vite cache
 .vite/
 frontend/node_modules/.vite/
 
-# Logs
 npm-debug.log*
 yarn-debug.log*
 pnpm-debug.log*
-# Python cache
+
+##################################
+# Python
+##################################
+
 __pycache__/
 *.pyc
 
-# Debug / test files
+
+##################################
+# Debug files
+##################################
+
 *.txt
 *.json
 ngrok_*
 port_*
 process_*
 debug_*
-# Python cache
-__pycache__/
+
+##################################
+TranslationService/venv/
+**/__pycache__/
 *.pyc
+bin/
+obj/

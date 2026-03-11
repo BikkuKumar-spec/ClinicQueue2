@@ -1,9 +1,13 @@
 fastapi
-uvicorn
+uvicorn[standard]
 torch
-transformers
+transformers==4.37.2
 sentencepiece
-mosestokenizer
 huggingface_hub
-IndicTrans2
 pydantic
+langid
+indic-transliteration
+requests
+sacremoses
+protobuf
+accelerate

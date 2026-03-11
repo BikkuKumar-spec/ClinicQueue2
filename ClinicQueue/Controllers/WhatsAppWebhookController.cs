@@ -151,6 +151,15 @@ namespace ClinicQueue.Controllers
                 "interactive" when message.Interactive?.Type == "list_reply"
                     => message.Interactive.ListReply?.Id ?? "",
 
+                // Document uploads: only allow actual PDFs into the extraction flow
+                "document" when !string.IsNullOrEmpty(message.Document?.Id)
+                    && message.Document.MimeType == "application/pdf"
+                    => $"PDF_UPLOAD:{message.Document.Id}",
+
+                // Non-PDF documents (images, Word docs, etc.) — reject gracefully
+                "document" when !string.IsNullOrEmpty(message.Document?.Id)
+                    => "DOC_UNSUPPORTED",
+
                 _ => ""
             };
         }
@@ -198,6 +207,21 @@ namespace ClinicQueue.Controllers
         public string? Type { get; set; }
         public MetaText? Text { get; set; }
         public MetaInteractive? Interactive { get; set; }
+
+        [JsonPropertyName("document")]
+        public MetaDocument? Document { get; set; }
+    }
+
+    public class MetaDocument
+    {
+        [JsonPropertyName("id")]
+        public string? Id { get; set; }
+
+        [JsonPropertyName("mime_type")]
+        public string? MimeType { get; set; }
+
+        [JsonPropertyName("filename")]
+        public string? Filename { get; set; }
     }
 
     public class MetaText

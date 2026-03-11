@@ -2,6 +2,7 @@ import os
 import asyncio
 import torch
 import logging
+from datetime import date
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -20,7 +21,8 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:3b-instruct")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.1:latest")
+HF_TOKEN = os.environ.get("HF_TOKEN", None)
 
 app = FastAPI(title="Indic Translation Service + Hinglish Support")
 
@@ -116,7 +118,7 @@ Current Date: {current_date}
 """.format(
     specialties=", ".join(ALLOWED_SPECIALTIES),
     doctors=", ".join(ALLOWED_DOCTORS),
-    current_date="2026-02-23" # Hardcoded for now, ideally dynamic
+    current_date=date.today().isoformat()
 )
 
 
@@ -144,34 +146,52 @@ class DetectLanguageResponse(BaseModel):
     confidence: float
 
 # ------------------------
-# Model Loading
+# Model Loading (Lazy)
 # ------------------------
+models_loaded = False
+models_loading = False
+
 def load_models():
     global en_indic_model, en_indic_tokenizer
     global indic_en_model, indic_en_tokenizer
+    global models_loaded, models_loading
 
-    logger.info("Loading translation models...")
+    if models_loaded:
+        return
+    if models_loading:
+        logger.info("[MODELS] Already loading, skipping duplicate call.")
+        return
+
+    models_loading = True
+    logger.info("[MODELS] Loading translation models (lazy)...")
 
     en_ckpt = "ai4bharat/indictrans2-en-indic-dist-200m"
     indic_ckpt = "ai4bharat/indictrans2-indic-en-dist-200m"
 
-    en_indic_tokenizer = AutoTokenizer.from_pretrained(en_ckpt, trust_remote_code=True)
-    en_indic_model = AutoModelForSeq2SeqLM.from_pretrained(
-        en_ckpt, trust_remote_code=True
-    ).to(device)
+    token_kwargs = {"token": HF_TOKEN} if HF_TOKEN else {}
 
-    indic_en_tokenizer = AutoTokenizer.from_pretrained(indic_ckpt, trust_remote_code=True)
-    indic_en_model = AutoModelForSeq2SeqLM.from_pretrained(
-        indic_ckpt, trust_remote_code=True
-    ).to(device)
+    try:
+        en_indic_tokenizer = AutoTokenizer.from_pretrained(en_ckpt, trust_remote_code=True, **token_kwargs)
+        en_indic_model = AutoModelForSeq2SeqLM.from_pretrained(
+            en_ckpt, trust_remote_code=True, **token_kwargs
+        ).to(device)
 
-    logger.info("Models loaded successfully.")
+        indic_en_tokenizer = AutoTokenizer.from_pretrained(indic_ckpt, trust_remote_code=True, **token_kwargs)
+        indic_en_model = AutoModelForSeq2SeqLM.from_pretrained(
+            indic_ckpt, trust_remote_code=True, **token_kwargs
+        ).to(device)
+
+        models_loaded = True
+        logger.info("[MODELS] Models loaded successfully.")
+    except Exception as e:
+        logger.error(f"[MODELS] Failed to load models: {e}")
+    finally:
+        models_loading = False
 
 @app.on_event("startup")
 async def startup_event():
-    load_models()
     langid.set_languages(SUPPORTED_LANGS)
-    logger.info("Service Ready")
+    logger.info("Service Ready — models will load on first translation request.")
 
 # ------------------------
 # Language Detection
@@ -201,6 +221,15 @@ def run_translation(text: str, src_lang: str, tgt_lang: str):
     if src_lang == tgt_lang:
         return text
 
+    # Lazy load models on first translation call
+    if not models_loaded:
+        logger.info("[TRANSLATE] Models not loaded yet — loading now (this may take a few minutes)...")
+        load_models()
+
+    if not models_loaded:
+        logger.error("[TRANSLATE] Models unavailable. Returning original text.")
+        return text
+
     if src_lang == "eng_Latn":
         model = en_indic_model
         tokenizer = en_indic_tokenizer
@@ -224,8 +253,11 @@ def sanitize_ai_output(output: dict) -> dict:
     cleaned = {k: v.strip() if isinstance(v, str) else v for k, v in output.items()}
 
     # Ensure required top-level keys
-    cleaned.setdefault("reply_message", "I apologize, but I'm having trouble processing that. Could you please rephrase?")
-    cleaned.setdefault("intent", "General_Inquiry")
+    # If reply_message is missing/empty, fall back to old-schema fields (stage/question)
+    if not cleaned.get("reply_message"):
+        fallback = cleaned.get("question") or cleaned.get("stage") or "I apologize, but I'm having trouble processing that. Could you please rephrase?"
+        cleaned["reply_message"] = fallback
+    cleaned.setdefault("intent", cleaned.get("stage", "General_Inquiry"))
     cleaned.setdefault("missing_info", [])
 
     # Ensure extracted_entities
@@ -364,8 +396,39 @@ async def reset_session(session_id: str = "default_user"):
     return {"message": "Session reset"}
 
 # ------------------------
+# Detect (called by C# TranslationService)
+# ------------------------
+class DetectRequest(BaseModel):
+    text: str
+
+@app.post("/detect")
+async def detect_endpoint(request: DetectRequest):
+    lang = detect_language(request.text)
+    return {"language": lang}
+
+# ------------------------
+# Translate (called by C# TranslationService)
+# ------------------------
+class TranslateRequest(BaseModel):
+    text: str
+    src_lang: str
+    target_lang: str
+
+@app.post("/translate")
+async def translate_endpoint(request: TranslateRequest):
+    result = await asyncio.to_thread(
+        run_translation, request.text, request.src_lang, request.target_lang
+    )
+    return {"translated_text": result}
+
+# ------------------------
 # Health
 # ------------------------
 @app.get("/health")
 async def health_check():
-    return {"status": "ok", "allowed_specialties": ALLOWED_SPECIALTIES}
+    return {
+        "status": "ok",
+        "model": OLLAMA_MODEL,
+        "models_loaded": models_loaded,
+        "allowed_specialties": ALLOWED_SPECIALTIES
+    }
