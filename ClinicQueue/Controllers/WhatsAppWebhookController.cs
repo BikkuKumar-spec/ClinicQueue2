@@ -156,9 +156,13 @@ namespace ClinicQueue.Controllers
                     && message.Document.MimeType == "application/pdf"
                     => $"PDF_UPLOAD:{message.Document.Id}",
 
-                // Non-PDF documents (images, Word docs, etc.) — reject gracefully
+                // Non-PDF documents (Word docs, etc.) — reject gracefully
                 "document" when !string.IsNullOrEmpty(message.Document?.Id)
                     => "DOC_UNSUPPORTED",
+
+                // Image uploads: extract media ID for OCR processing
+                "image" when !string.IsNullOrEmpty(message.Image?.Id)
+                    => $"IMAGE_UPLOAD:{message.Image.Id}",
 
                 _ => ""
             };
@@ -210,6 +214,9 @@ namespace ClinicQueue.Controllers
 
         [JsonPropertyName("document")]
         public MetaDocument? Document { get; set; }
+
+        [JsonPropertyName("image")]
+        public MetaImage? Image { get; set; }
     }
 
     public class MetaDocument
@@ -222,6 +229,21 @@ namespace ClinicQueue.Controllers
 
         [JsonPropertyName("filename")]
         public string? Filename { get; set; }
+    }
+
+    /// <summary>
+    /// Model for WhatsApp image message payload.
+    /// </summary>
+    public class MetaImage
+    {
+        [JsonPropertyName("id")]
+        public string? Id { get; set; }
+
+        [JsonPropertyName("mime_type")]
+        public string? MimeType { get; set; }
+
+        [JsonPropertyName("sha256")]
+        public string? Sha256 { get; set; }
     }
 
     public class MetaText

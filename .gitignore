@@ -1,0 +1,45 @@
+# Python bytecode and cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+*/venv/
+*/.venv/
+
+# Service-local runtime caches
+OCRService/.pytest_cache/
+OCRService/.mypy_cache/
+OCRService/.ruff_cache/
+OCRService/.cache/
+TranslationService/.pytest_cache/
+TranslationService/.mypy_cache/
+TranslationService/.ruff_cache/
+TranslationService/.cache/
+
+# Environment and logs
+.env
+.env.*
+*.log
+
+# Build artifacts
+build/
+dist/
+
+# IDE/editor files
+.vscode/
+.idea/
+
+# Temporary files
+*.tmp
+*.temp
+*.swp
+
+# OS files
+.DS_Store
+Thumbs.db

@@ -25,6 +25,7 @@ namespace ClinicQueue.Services
         private readonly IWhatsAppMediaService _mediaService;
         private readonly IPdfExtractionService _pdfService;
         private readonly IReportSummaryService _summaryService;
+        private readonly IOcrService _ocrService;
 
         public WhatsAppBotService(
             IAppointmentService appointmentService,
@@ -38,7 +39,8 @@ namespace ClinicQueue.Services
             BotSessionStore sessions,
             IWhatsAppMediaService mediaService,
             IPdfExtractionService pdfService,
-            IReportSummaryService summaryService)
+            IReportSummaryService summaryService,
+            IOcrService ocrService)
         {
             _appointmentService = appointmentService;
             _patientService = patientService;
@@ -52,6 +54,7 @@ namespace ClinicQueue.Services
             _mediaService = mediaService;
             _pdfService = pdfService;
             _summaryService = summaryService;
+            _ocrService = ocrService;
         }
 
         public class BookingSession
@@ -309,6 +312,11 @@ namespace ClinicQueue.Services
             {
                 return await HandlePdfUploadAsync(phoneNumber, input.Substring("PDF_UPLOAD:".Length), lang);
             }
+            // ── PRIORITY 3: Image Upload (OCR) ────────────────────────────────────
+            if (normalizedInput.StartsWith("IMAGE_UPLOAD:"))
+            {
+                return await HandleImageUploadAsync(phoneNumber, input.Substring("IMAGE_UPLOAD:".Length), lang);
+            }
             if (normalizedInput == "DOC_UNSUPPORTED")
             {
                 var rejectMsg = await T("📄 I can only process PDF files. Please upload your medical report as a PDF document.", lang);
@@ -514,7 +522,7 @@ namespace ClinicQueue.Services
                 _sessions.Set(phoneNumber, "Awaiting_Summary_Consent", data);
 
                 // 4. Ask for consent
-                var consentMsg = await T("📄 I received your medical report! Would you like me to read it and generate a simple summary? (Reply Yes/No)", lang);
+                var consentMsg = await T("📄 Got your report. Want a quick summary? Reply Yes or No.", lang);
                 await _metaService.SendTextMessageAsync(phoneNumber, consentMsg);
                 return "Awaiting_Summary_Consent";
             }
@@ -524,6 +532,84 @@ namespace ClinicQueue.Services
                 var errorMsg = await T("❌ Sorry, I had trouble processing your document. Please make sure it's a valid PDF file and try again.", lang);
                 await _metaService.SendTextMessageAsync(phoneNumber, errorMsg);
                 return "PDF_ERROR";
+            }
+        }
+
+        // ─── Image Upload & OCR ──────────────────────────────────────────────────
+
+        /// <summary>
+        /// Handles image uploads from WhatsApp for OCR text extraction.
+        /// Downloads image from Meta, sends to OCR microservice, processes result.
+        /// </summary>
+        private async Task<string> HandleImageUploadAsync(string phoneNumber, string mediaId, string lang)
+        {
+            try
+            {
+                Console.WriteLine($"[IMAGE OCR] Starting OCR for media {mediaId} from {phoneNumber}");
+                
+                // 1. Check if OCR service is healthy
+                var isHealthy = await _ocrService.IsServiceHealthyAsync();
+                if (!isHealthy)
+                {
+                    Console.WriteLine("[IMAGE OCR] OCR service is not available");
+                    var unavailableMsg = await T("📷 Image processing is temporarily unavailable. Please try again later or upload a PDF document instead.", lang);
+                    await _metaService.SendTextMessageAsync(phoneNumber, unavailableMsg);
+                    return "OCR_UNAVAILABLE";
+                }
+
+                // 2. Download image from Meta Graph API
+                var imageBytes = await _mediaService.DownloadMediaAsync(mediaId);
+                Console.WriteLine($"[IMAGE OCR] Downloaded {imageBytes.Length} bytes");
+
+                if (imageBytes.Length == 0)
+                {
+                    var downloadErrorMsg = await T("📷 I couldn't download your image. Please try sending it again.", lang);
+                    await _metaService.SendTextMessageAsync(phoneNumber, downloadErrorMsg);
+                    return "IMAGE_DOWNLOAD_ERROR";
+                }
+
+                // 3. Send acknowledgment
+                var processingMsg = await T("📷 Got your image. Let me read the text...", lang);
+                await _metaService.SendTextMessageAsync(phoneNumber, processingMsg);
+
+                // 4. Call OCR microservice
+                var ocrResult = await _ocrService.ExtractTextFromImageAsync(imageBytes, $"whatsapp_{mediaId}.jpg");
+                Console.WriteLine($"[IMAGE OCR] OCR result: Success={ocrResult.Success}, TextLength={ocrResult.ExtractedText?.Length ?? 0}");
+
+                if (!ocrResult.Success || string.IsNullOrWhiteSpace(ocrResult.ExtractedText))
+                {
+                    var noTextMsg = await T("📷 I couldn't read text from that image. Please send a clearer image or a PDF.", lang);
+                    await _metaService.SendTextMessageAsync(phoneNumber, noTextMsg);
+                    return "OCR_NO_TEXT";
+                }
+
+                // 5. Save to session for summary consent flow (same as PDF)
+                var data = new BookingSession
+                {
+                    SymptomLanguage = lang,
+                    TempExtractedReportText = ocrResult.ExtractedText
+                };
+
+                // Preserve existing session if mid-conversation
+                if (_sessions.TryGet(phoneNumber, out var existing))
+                {
+                    existing.Data.TempExtractedReportText = ocrResult.ExtractedText;
+                    data = existing.Data;
+                }
+
+                _sessions.Set(phoneNumber, "Awaiting_Summary_Consent", data);
+
+                // 6. Ask for consent (same flow as PDF)
+                var successMsg = await T("✅ I read the text from your image. Want a quick summary? Reply Yes or No.", lang);
+                await _metaService.SendTextMessageAsync(phoneNumber, successMsg);
+                return "Awaiting_Summary_Consent";
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[IMAGE OCR ERROR] {ex.Message}\n{ex.StackTrace}");
+                var errorMsg = await T("❌ Sorry, I had trouble processing your image. Please try again or upload a PDF document instead.", lang);
+                await _metaService.SendTextMessageAsync(phoneNumber, errorMsg);
+                return "OCR_ERROR";
             }
         }
 
@@ -555,7 +641,7 @@ namespace ClinicQueue.Services
                     }
                     else
                     {
-                        var processingMsg = await T("🔍 Analyzing your report... This may take a moment.", lang);
+                        var processingMsg = await T("🔍 Reading your report now. One moment...", lang);
                         await _metaService.SendTextMessageAsync(phoneNumber, processingMsg);
 
                         var summary = await _summaryService.GenerateReportSummaryAsync(data.TempExtractedReportText);
@@ -563,19 +649,29 @@ namespace ClinicQueue.Services
                         if (string.IsNullOrWhiteSpace(summary))
                             summary = "Unable to generate a summary. The report content may not contain standard lab values.";
 
-                        var translatedSummary = await T($"📋 *Report Summary:*\n\n{summary}\n\n⚠️ _This is an AI-generated summary for informational purposes only. Please consult your doctor for medical advice._", lang);
+                        var summaryMessage = $"📋 *Quick summary:*\n\n{summary}\n\n⚠️ _This is informational only. Please confirm with your doctor._";
+                        string translatedSummary;
+                        try
+                        {
+                            translatedSummary = await T(summaryMessage, lang);
+                        }
+                        catch
+                        {
+                            // Do not fail the whole flow if translation is temporarily unavailable.
+                            translatedSummary = summaryMessage;
+                        }
                         await _metaService.SendTextMessageAsync(phoneNumber, translatedSummary);
                     }
                 }
                 else if (noReplies.Contains(normalizedReply))
                 {
-                    var declineMsg = await T("👍 Okay, no problem. I have cleared your report from my memory.", lang);
+                    var declineMsg = await T("👍 No problem. I have cleared your report data.", lang);
                     await _metaService.SendTextMessageAsync(phoneNumber, declineMsg);
                 }
                 else
                 {
                     // User typed something other than yes/no — re-prompt
-                    var repromptMsg = await T("Please reply with *Yes* or *No*. Would you like me to summarize your medical report?", lang);
+                    var repromptMsg = await T("Please reply Yes or No. Should I summarize your report?", lang);
                     await _metaService.SendTextMessageAsync(phoneNumber, repromptMsg);
                     return "Awaiting_Summary_Consent";
                 }
@@ -583,7 +679,7 @@ namespace ClinicQueue.Services
             catch (Exception ex)
             {
                 Console.WriteLine($"[SUMMARY ERROR] {ex.Message}");
-                var errorMsg = await T("❌ Sorry, I had trouble generating the summary. Please try uploading your report again.", lang);
+                var errorMsg = await T("❌ I hit an issue while summarizing. Please try again in a moment.", lang);
                 await _metaService.SendTextMessageAsync(phoneNumber, errorMsg);
             }
 

@@ -21,7 +21,8 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.1:latest")
+OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://10.30.1.34:11434")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.1:8b")
 HF_TOKEN = os.environ.get("HF_TOKEN", None)
 
 app = FastAPI(title="Indic Translation Service + Hinglish Support")
@@ -54,16 +55,23 @@ LANGID_TO_INDIC = {
 }
 
 ALLOWED_SPECIALTIES = [
-    "General Physician", "Dermatologist", "Pediatrician", 
-    "Orthopedist", "ENT Specialist", "Ophthalmologist", 
-    "Cardiologist", "Pulmonologist"
+    "General Physician",
+    "Dermatologist",
+    "Pediatrician",
+    "Orthopedist",
+    "ENT Specialist"
 ]
 ALLOWED_DOCTORS = [
-    "Dr. Sharma (General Physician)", "Dr. Verma (General Physician)",
-    "Dr. Mehta (Dermatologist)", "Dr. Ajay (Dermatologist)",
-    "Dr. Gupta (Pediatrician)", "Dr. Rao (Orthopedist)",
-    "Dr. Singh (ENT Specialist)", "Dr. Kapoor (Ophthalmologist)",
-    "Dr. Desai (Cardiologist)", "Dr. Iyer (Pulmonologist)"
+    "Dr. Suresh (General Physician)",
+    "Dr. Mukesh (General Physician)",
+    "Dr. Akash (Dermatologist)",
+    "Dr. Ajay (Dermatologist)",
+    "Dr. Beena (Pediatrician)",
+    "Dr. Kavya (Pediatrician)",
+    "Dr. Raj (Orthopedist)",
+    "Dr. Kumar (Orthopedist)",
+    "Dr. Priya (ENT Specialist)",
+    "Dr. Anil (ENT Specialist)"
 ]
 NO_TRANSLATE_FIELDS = {"intent", "specialty_needed", "preferred_doctor", "preferred_date", "preferred_time", "patient_name", "missing_info"}
 
@@ -93,6 +101,57 @@ You guide patients through triage, specialty recommendation, doctor selection, a
    - Negotiate date and time naturally (Today, Tomorrow, or specific dates/times).
    - Once all details (Patient Name, Doctor, Date, Time) are gathered, confirm the booking.
 3. **Language**: You will receive input in English and must output in English. (Translation is handled externally).
+
+### STRICT REPLY RULES:
+- Maximum 2 sentences per reply.
+- Never use formal corporate language.
+- Sound like a friendly human receptionist.
+- No disclaimers or legal-style text.
+- No 'please don't hesitate to reach out'.
+- No 'we look forward to seeing you'.
+- Confirmation must be ONE short message.
+- Example good confirmation:
+    'Done! Dr. Mukesh at 3:00 PM today. See you then!'
+- Example bad confirmation:
+    'Your appointment is confirmed. Please arrive 15 minutes early. If you have questions contact us. Details: Name...'
+- Ask ONE thing at a time only.
+- Never list appointment details in long format.
+
+### REPLY LENGTH RULES:
+- Maximum 1-2 short sentences per reply.
+- Never more than 20 words in a reply.
+- Sound like a real friend not a doctor.
+- No formal language ever.
+- No disclaimers.
+
+Example styles:
+
+BAD (too long):
+"Sorry to hear that you're feeling unwell.
+ Can you please tell me how long you've
+ had the fever and is it accompanied by
+ any other symptoms like cough, headache,
+ or body aches?"
+
+GOOD (correct):
+"Oh no! How long have you had fever?
+ Any other symptoms?"
+
+BAD:
+"I've booked Dr. Suresh for tomorrow at
+ 2:00 PM. Is that okay with you?"
+
+GOOD:
+"Done! Dr. Suresh tomorrow at 2 PM. 🏥"
+
+BAD:
+"I think it's best for you to see a
+ General Physician. Based on your symptoms,
+ Dr. Suresh or Dr. Mukesh would be a good fit."
+
+GOOD:
+"Sounds like you need a General Physician.
+ Dr. Suresh free tomorrow. Shall I book?"
 
 ### KNOWLEDGE BASE:
 - **Allowed Specialties**: {specialties}
@@ -292,7 +351,7 @@ def call_qwen(user_message: str, history):
         logger.info(f"[OLLAMA] Calling {OLLAMA_MODEL} with message: {user_message}")
 
         response = requests.post(
-            "http://localhost:11434/api/chat",
+            f"{OLLAMA_BASE_URL.rstrip('/')}/api/chat",
             json={
                 "model": OLLAMA_MODEL,
                 "messages": messages,

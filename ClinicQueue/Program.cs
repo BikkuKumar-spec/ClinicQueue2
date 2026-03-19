@@ -73,6 +73,29 @@ builder.Services.AddSingleton<BotSessionStore>();
 // PDF Extraction (stateless, lightweight — singleton is fine)
 builder.Services.AddSingleton<IPdfExtractionService, PdfExtractionService>();
 
+// ────────────────────────────────────────────────────────────────────────────────
+// OCR SERVICE - Calls Python OCR Microservice for image text extraction
+// ────────────────────────────────────────────────────────────────────────────────
+// WWH:
+// WHAT: HttpClient configured to communicate with the Python OCR microservice
+// WHY: Images need PaddleOCR for text extraction, which runs in a separate service
+// HOW: AddHttpClient<IOcrService, OcrService> creates a typed client with proper lifecycle
+builder.Services.AddHttpClient<IOcrService, OcrService>(client =>
+{
+    var ocrUrl = builder.Configuration["AI:OcrServiceUrl"] ?? "http://localhost:8001";
+    client.BaseAddress = new Uri(ocrUrl);
+    client.Timeout = TimeSpan.FromSeconds(60); // OCR can take time for large images
+});
+
+// ────────────────────────────────────────────────────────────────────────────────
+// DOCUMENT EXTRACTION SERVICE - Unified interface for PDF and Image extraction
+// ────────────────────────────────────────────────────────────────────────────────
+// WWH:
+// WHAT: Service that routes files to appropriate extraction method (PDF or OCR)
+// WHY: Controllers have one service to call regardless of file type
+// HOW: Scoped lifetime - new instance per request, uses IPdfExtractionService and IOcrService
+builder.Services.AddScoped<IDocumentExtractionService, DocumentExtractionService>();
+
 // WhatsApp Media Downloader (uses Meta API to download uploaded files)
 builder.Services.AddSingleton<IWhatsAppMediaService>(sp =>
 {
@@ -93,13 +116,16 @@ builder.Services.AddSingleton<IWhatsAppMediaService>(sp =>
 builder.Services.AddSingleton<IReportSummaryService>(sp =>
 {
     var ollamaEndpoint = builder.Configuration["AI:OllamaEndpoint"]
-        ?? "http://localhost:11434/api/generate";
+        ?? "http://10.30.1.34:11434/api/generate";
+    var ollamaModel = builder.Configuration["AI:OllamaModel"]
+        ?? "llama3.1:8b";
+    var useOllama = builder.Configuration.GetValue<bool?>("AI:UseOllama") ?? false;
     var httpClientFactory = sp.GetRequiredService<IHttpClientFactory>();
     var httpClient = httpClientFactory.CreateClient();
     httpClient.Timeout = TimeSpan.FromSeconds(180); // Qwen 7B can be slow on CPU
     var logger = sp.GetRequiredService<ILogger<ReportSummaryService>>();
 
-    return new ReportSummaryService(httpClient, ollamaEndpoint, logger);
+    return new ReportSummaryService(httpClient, ollamaEndpoint, ollamaModel, useOllama, logger);
 });
 
 // Application Services

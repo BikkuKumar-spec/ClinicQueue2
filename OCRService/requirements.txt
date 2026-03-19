@@ -1,0 +1,67 @@
+# =============================================================================
+# REQUIREMENTS.TXT - OCR MICROSERVICE DEPENDENCIES
+# =============================================================================
+# 
+# WWH EXPLANATION:
+# 
+# WHAT: This file lists all Python packages needed to run the OCR service.
+# WHY: pip uses this file to install all dependencies at once.
+# HOW: Run 'pip install -r requirements.txt' to install everything.
+#
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# WEB FRAMEWORK
+# -----------------------------------------------------------------------------
+# FastAPI: Modern, fast web framework for building APIs
+# Why: High performance, automatic docs, type validation, async support
+fastapi>=0.100.0
+
+# Uvicorn: ASGI server to run FastAPI applications
+# Why: Fast, production-ready server recommended by FastAPI
+uvicorn[standard]>=0.22.0
+
+# -----------------------------------------------------------------------------
+# OCR ENGINE
+# -----------------------------------------------------------------------------
+# PaddleOCR: Optical Character Recognition library
+# Why: Accurate OCR supporting 80+ languages, works offline
+paddleocr>=2.7.0
+
+# PaddlePaddle: Deep learning framework (required by PaddleOCR)
+# Why: PaddleOCR models are built on PaddlePaddle
+# Note: Use 'paddlepaddle-gpu' if you have NVIDIA GPU
+paddlepaddle>=2.5.0
+
+# -----------------------------------------------------------------------------
+# IMAGE PROCESSING
+# -----------------------------------------------------------------------------
+# OpenCV: Computer vision library
+# Why: Image preprocessing (grayscale, denoising, thresholding)
+opencv-python>=4.8.0
+
+# NumPy: Numerical computing library
+# Why: Images are represented as numpy arrays
+numpy>=1.24.0
+
+# Pillow: Python Imaging Library
+# Why: Additional image format support
+Pillow>=10.0.0
+
+# -----------------------------------------------------------------------------
+# DATA VALIDATION
+# -----------------------------------------------------------------------------
+# Pydantic: Data validation using Python type hints
+# Why: Request/response validation for FastAPI
+pydantic>=2.0.0
+
+# -----------------------------------------------------------------------------
+# UTILITIES
+# -----------------------------------------------------------------------------
+# python-multipart: Multipart form data parser
+# Why: Required for file uploads in FastAPI
+python-multipart>=0.0.6
+
+# aiofiles: Async file operations
+# Why: Non-blocking file handling (optional but recommended)
+aiofiles>=23.0.0
