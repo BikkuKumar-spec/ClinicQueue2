@@ -6,11 +6,19 @@ namespace ClinicQueue.Infrastructure.ExternalServices.WhatsApp;
 
 public class WhatsAppClient(HttpClient httpClient) : IWhatsAppGateway
 {
+    private const int MaxBodyLength = 3500;
+
     public async Task<Result<bool>> SendTextAsync(string to, string message, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(message))
         {
             return Result<bool>.Failure("Failed to send WhatsApp message. Message body is empty.");
+        }
+
+        var safeMessage = message.Trim();
+        if (safeMessage.Length > MaxBodyLength)
+        {
+            safeMessage = safeMessage[..MaxBodyLength].TrimEnd() + "...";
         }
 
         var payload = new
@@ -19,7 +27,7 @@ public class WhatsAppClient(HttpClient httpClient) : IWhatsAppGateway
             recipient_type = "individual",
             to,
             type = "text",
-            text = new { body = message.Trim() }
+            text = new { body = safeMessage }
         };
 
         var response = await httpClient.PostAsJsonAsync("messages", payload, cancellationToken);

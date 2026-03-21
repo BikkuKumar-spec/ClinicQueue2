@@ -14,11 +14,10 @@ public class ReportSummaryGateway(HttpClient httpClient) : IReportSummaryGateway
             // Translation service currently exposes /chat, not /summary.
             // Use a dedicated session id to avoid polluting user booking conversations.
             var prompt =
-                "Classify this uploaded text first, then summarize for a patient. " +
-                "Reply in exactly this format:\n" +
-                "IS_MEDICAL: yes/no\n" +
-                "TYPE: <document type or non-medical>\n" +
-                "SUMMARY: <4 to 6 concise bullet points with key findings, possible concerns, and suggested next action>\n\n" +
+                "[REPORT_SUMMARY]\n" +
+                "Summarize this uploaded medical report for a patient. " +
+                "Return 4 to 6 short bullet points with key findings and any abnormal values if present. " +
+                "If the text is unreadable or non-medical, say that clearly in one short sentence.\n\n" +
                 extractedText;
 
             var requestBody = new
@@ -60,10 +59,27 @@ public class ReportSummaryGateway(HttpClient httpClient) : IReportSummaryGateway
     private static bool IsLowQualityReply(string reply)
     {
         var lowered = reply.ToLowerInvariant();
+        var trimmed = reply.Trim();
+
+        var hasBulletLikeContent = trimmed.Contains("\n-")
+            || trimmed.Contains("\n•")
+            || trimmed.Contains("\n*")
+            || trimmed.Contains("; ");
+
         return lowered.Contains("i apologize")
             || lowered.Contains("please rephrase")
             || lowered.Contains("having trouble processing")
-            || lowered.Contains("service temporarily unavailable");
+            || lowered.Contains("service temporarily unavailable")
+            || lowered.Contains("here's a summary of your lab report")
+            || lowered.Contains("here is a summary of your lab report")
+            || lowered.Contains("summary of your lab report")
+            || lowered.Contains("here are the key points")
+            || lowered.Contains("key points:")
+            || lowered.Contains("ai-generated summary")
+            || lowered.Contains("verify with your doctor")
+            || (trimmed.EndsWith(':') && !hasBulletLikeContent)
+            || (lowered.Contains("summary") && !hasBulletLikeContent)
+            || lowered.Length < 40;
     }
 
     private sealed class ChatSummaryResponse

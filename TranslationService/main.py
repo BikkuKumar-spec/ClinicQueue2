@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://10.30.1.34:11434")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.1:8b")
 HF_TOKEN = os.environ.get("HF_TOKEN", None)
+REPORT_SUMMARY_TRIGGER = "[REPORT_SUMMARY]"
 
 app = FastAPI(title="Indic Translation Service + Hinglish Support")
 
@@ -212,6 +213,32 @@ Current Date and Time: {current_datetime}
     current_datetime=current_datetime
 )
 
+REPORT_SUMMARY_SYSTEM_PROMPT = """You are a medical report summarization assistant.
+Your task is to summarize uploaded lab/medical report text for a patient in plain, easy English.
+
+Rules:
+- Extract key findings and abnormal values if present.
+- Keep summary concise and useful.
+- Use 4 to 6 short bullet points in reply_message.
+- Do not include booking flow, greetings, or appointment suggestions.
+- Do not add disclaimers.
+- If text is non-medical or unreadable, reply_message should say that clearly in one short sentence.
+
+Output JSON only using this schema:
+{
+    "reply_message": "string",
+    "intent": "General_Inquiry",
+    "extracted_entities": {
+        "specialty_needed": null,
+        "preferred_doctor": null,
+        "preferred_date": null,
+        "preferred_time": null,
+        "patient_name": null
+    },
+    "missing_info": []
+}
+"""
+
 
 sessions: Dict[str, list[Dict[str, str]]] = {}
 session_languages: Dict[str, str] = {}
@@ -220,6 +247,11 @@ session_languages: Dict[str, str] = {}
 # Schemas
 # ------------------------
 class ChatRequest(BaseModel):
+    text: str
+    session_id: str = "default_user"
+
+
+class SummarizeRequest(BaseModel):
     text: str
     session_id: str = "default_user"
 
@@ -371,16 +403,82 @@ def sanitize_ai_output(output: dict) -> dict:
 
     return cleaned
 
+
+def normalize_report_summary_output(output: dict) -> dict:
+    """Normalize non-schema summary payloads into the chat JSON schema.
+
+    Report-mode prompts may return keys like IS_MEDICAL/TYPE/SUMMARY instead of
+    reply_message. This adapter converts them into a concise bullet reply.
+    """
+    if not isinstance(output, dict):
+        return {
+            "reply_message": "I could not generate a clear summary.",
+            "intent": "General_Inquiry",
+            "extracted_entities": {
+                "specialty_needed": None,
+                "preferred_doctor": None,
+                "preferred_date": None,
+                "preferred_time": None,
+                "patient_name": None,
+            },
+            "missing_info": [],
+        }
+
+    # Prefer explicit reply_message when present; some models include SUMMARY
+    # with noisy raw OCR while reply_message is the intended concise output.
+    reply = str(output.get("reply_message") or "").strip()
+
+    if not reply:
+        raw_summary = output.get("SUMMARY")
+        if isinstance(raw_summary, list):
+            summary_lines = [str(x).strip() for x in raw_summary if str(x).strip()]
+            reply = "\n".join(f"- {line}" for line in summary_lines)
+        elif isinstance(raw_summary, str):
+            summary_lines = [x.strip(" -\t") for x in raw_summary.splitlines() if x.strip()]
+            reply = "\n".join(f"- {line}" for line in summary_lines)
+
+    if not reply:
+        doc_type = str(output.get("TYPE") or "medical report").strip()
+        is_medical = str(output.get("IS_MEDICAL") or "yes").strip().lower()
+        if is_medical in {"no", "false", "non-medical"}:
+            reply = "The uploaded file does not look like a medical report."
+        else:
+            reply = f"- Summary generated for the uploaded {doc_type}."
+
+    normalized = {
+        "reply_message": reply,
+        "intent": "General_Inquiry",
+        "extracted_entities": {
+            "specialty_needed": None,
+            "preferred_doctor": None,
+            "preferred_date": None,
+            "preferred_time": None,
+            "patient_name": None,
+        },
+        "missing_info": [],
+    }
+
+    return normalized
+
 # ------------------------
 # Qwen Call (UNCHANGED)
 # ------------------------
 def call_qwen(user_message: str, history):
     try:
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-        messages.extend(history)
-        messages.append({"role": "user", "content": user_message})
+        is_report_summary_mode = user_message.startswith(REPORT_SUMMARY_TRIGGER)
 
-        logger.info(f"[OLLAMA] Calling {OLLAMA_MODEL} with message: {user_message}")
+        effective_user_message = user_message
+        if is_report_summary_mode:
+            effective_user_message = user_message[len(REPORT_SUMMARY_TRIGGER):].strip()
+
+        system_prompt = REPORT_SUMMARY_SYSTEM_PROMPT if is_report_summary_mode else SYSTEM_PROMPT
+
+        messages = [{"role": "system", "content": system_prompt}]
+        if not is_report_summary_mode:
+            messages.extend(history)
+        messages.append({"role": "user", "content": effective_user_message})
+
+        logger.info(f"[OLLAMA] Calling {OLLAMA_MODEL} with message: {effective_user_message}")
 
         response = requests.post(
             f"{OLLAMA_BASE_URL.rstrip('/')}/api/chat",
@@ -408,6 +506,10 @@ def call_qwen(user_message: str, history):
         logger.info(f"[OLLAMA CONTENT] {content}")
         
         parsed = json.loads(content)
+
+        if is_report_summary_mode:
+            return sanitize_ai_output(normalize_report_summary_output(parsed))
+
         return sanitize_ai_output(parsed)
 
     except Exception as e:
@@ -476,6 +578,38 @@ async def chat(request: ChatRequest):
         english_output=english_output,
         final_output=final_output
     )
+
+
+@app.post("/summarize")
+async def summarize(request: SummarizeRequest):
+    prompt = f"""Read this medical report
+and give a simple summary in 4-6 lines.
+Only include what is in the report.
+Use simple words.
+No headings. No bullet points.
+No extra text. Just the summary.
+
+Report:
+{request.text}"""
+
+    try:
+        response = requests.post(
+            f"{OLLAMA_BASE_URL.rstrip('/')}/api/chat",
+            json={
+                "model": OLLAMA_MODEL,
+                "messages": [{"role": "user", "content": prompt}],
+                "stream": False,
+            },
+            timeout=120,
+        )
+
+        if not response.ok:
+            return {"summary": ""}
+
+        content = response.json().get("message", {}).get("content", "")
+        return {"summary": str(content).strip()}
+    except Exception:
+        return {"summary": ""}
 
 # ------------------------
 # Reset

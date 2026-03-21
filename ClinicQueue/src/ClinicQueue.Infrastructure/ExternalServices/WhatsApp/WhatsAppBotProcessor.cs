@@ -1,4 +1,7 @@
 using System.Globalization;
+using System.Net.Http;
+using System.Net.Http.Json;
+using System.Text.Json;
 using ClinicQueue.Application.Interfaces;
 using ClinicQueue.Domain.Entities;
 using ClinicQueue.Domain.Enums;
@@ -24,6 +27,7 @@ public class WhatsAppBotProcessor(
     IConfiguration configuration,
     ILogger<WhatsAppBotProcessor> logger) : IWhatsAppBotProcessor
 {
+    private const string SummarizeEndpoint = "http://localhost:5001/summarize";
     private readonly int _lookAheadDays = GetPositiveInt(configuration["ClinicSettings:BookingWindowDays"], 7);
     private readonly int _reminderMinutesBefore = GetPositiveInt(configuration["ClinicSettings:ReminderMinutesBefore"], 10);
 
@@ -234,48 +238,17 @@ public class WhatsAppBotProcessor(
                 return;
             }
 
-            if (!IsLikelyMedicalReport(cleanedText))
+            var summarizeResponse = await SummarizeDocumentAsync(cleanedText, to, cancellationToken);
+            var summaryText = summarizeResponse.Summary;
+
+            if (string.IsNullOrWhiteSpace(summaryText) || IsLowQualitySummaryReply(summaryText))
             {
-                await SendTextAsync(
-                    to,
-                    "This does not look like a medical report. Please upload a lab report, prescription, or hospital document.",
-                    cancellationToken);
-                return;
+                summaryText = BuildFallbackSummary(cleanedText);
             }
 
-            string analysisReply;
+            var formattedReply = $"{summaryText}\n\nThis is AI-generated. Please see a doctor.";
 
-            // Prefer the dedicated summary endpoint first for stable, short document summaries.
-            var summaryResult = await reportSummaryGateway.GenerateSummaryAsync(cleanedText, cancellationToken);
-            if (summaryResult.IsSuccess && !string.IsNullOrWhiteSpace(summaryResult.Value))
-            {
-                analysisReply = summaryResult.Value.Trim();
-            }
-            else
-            {
-                var analysisPrompt =
-                    "Summarize this document text for a patient in 3 short bullet points. " +
-                    "Do not ask questions.\n\n" +
-                    cleanedText;
-
-                var (_, displayOutput, _) = await conversationAiGateway.ChatWithDisplayAsync(
-                    $"{to}:doc-analysis",
-                    analysisPrompt,
-                    cancellationToken);
-
-                analysisReply = string.IsNullOrWhiteSpace(displayOutput.ReplyMessage)
-                    ? string.Empty
-                    : displayOutput.ReplyMessage.Trim();
-            }
-
-            if (IsLowQualitySummaryReply(analysisReply))
-            {
-                analysisReply = BuildFallbackSummary(cleanedText);
-            }
-
-            analysisReply = AddAiVerificationNote(analysisReply);
-
-            await SendTextAsync(to, analysisReply, cancellationToken);
+            await SendTextAsync(to, formattedReply, cancellationToken);
         }
         catch (Exception ex)
         {
@@ -330,13 +303,24 @@ public class WhatsAppBotProcessor(
 
         var value = reply.Trim();
         var lowered = value.ToLowerInvariant();
+        var hasBulletLikeContent = value.Contains("\n-")
+            || value.Contains("\n•")
+            || value.Contains("\n*")
+            || value.Contains("; ");
 
         return lowered.Contains("i apologize")
             || lowered.Contains("could you please rephrase")
             || lowered.Contains("having trouble processing")
             || lowered.Contains("please rephrase")
             || lowered.Contains("i didn't quite understand")
-            || lowered.Contains("service temporarily unavailable");
+            || lowered.Contains("service temporarily unavailable")
+            || lowered.Contains("your medical summary")
+            || lowered.Contains("summary of your lab report")
+            || lowered.Contains("here are the key points")
+            || lowered.Contains("key points:")
+            || (value.EndsWith(':') && !hasBulletLikeContent)
+            || (lowered.Contains("summary") && !hasBulletLikeContent)
+            || lowered.Length < 40;
     }
 
     private static string BuildFallbackSummary(string extractedText)
@@ -391,6 +375,148 @@ public class WhatsAppBotProcessor(
 
         var hits = medicalKeywords.Count(lowered.Contains);
         return hits >= 2;
+    }
+
+    private async Task<SummarizeResult> SummarizeDocumentAsync(string extractedText, string phoneNumber, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var httpClient = new HttpClient();
+            var summarizeRequest = new
+            {
+                text = extractedText,
+                session_id = phoneNumber
+            };
+
+            using var response = await httpClient.PostAsJsonAsync(SummarizeEndpoint, summarizeRequest, cancellationToken);
+            if (!response.IsSuccessStatusCode)
+            {
+                logger.LogWarning("Summarize endpoint failed with status {StatusCode} for {Phone}", response.StatusCode, phoneNumber);
+                return SummarizeResult.Empty;
+            }
+
+            await using var responseStream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            using var json = await JsonDocument.ParseAsync(responseStream, cancellationToken: cancellationToken);
+
+            return ParseSummarizeResponse(json.RootElement);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Summarize endpoint call failed for {Phone}", phoneNumber);
+            return SummarizeResult.Empty;
+        }
+    }
+
+    private static SummarizeResult ParseSummarizeResponse(JsonElement root)
+    {
+        var isMedical = ReadBooleanLikeValue(root, "is_medical")
+            ?? ReadBooleanLikeValue(root, "IS_MEDICAL")
+            ?? true;
+
+        var documentType = ReadStringValue(root, "documentType")
+            ?? ReadStringValue(root, "document_type")
+            ?? ReadStringValue(root, "type")
+            ?? ReadStringValue(root, "TYPE")
+            ?? "medical report";
+
+        var summary = ReadSummaryValue(root);
+
+        return new SummarizeResult(isMedical, documentType, summary);
+    }
+
+    private static bool? ReadBooleanLikeValue(JsonElement root, string propertyName)
+    {
+        if (!root.TryGetProperty(propertyName, out var value))
+        {
+            return null;
+        }
+
+        return value.ValueKind switch
+        {
+            JsonValueKind.True => true,
+            JsonValueKind.False => false,
+            JsonValueKind.String => ParseBooleanText(value.GetString()),
+            _ => null,
+        };
+    }
+
+    private static bool? ParseBooleanText(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        var lowered = value.Trim().ToLowerInvariant();
+        return lowered switch
+        {
+            "yes" => true,
+            "true" => true,
+            "medical" => true,
+            "no" => false,
+            "false" => false,
+            "non-medical" => false,
+            _ => null,
+        };
+    }
+
+    private static string? ReadStringValue(JsonElement root, string propertyName)
+    {
+        if (!root.TryGetProperty(propertyName, out var value))
+        {
+            return null;
+        }
+
+        return value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : value.ToString();
+    }
+
+    private static string ReadSummaryValue(JsonElement root)
+    {
+        if (root.TryGetProperty("summary", out var summary))
+        {
+            return ExtractSummary(summary);
+        }
+
+        if (root.TryGetProperty("SUMMARY", out var uppercaseSummary))
+        {
+            return ExtractSummary(uppercaseSummary);
+        }
+
+        if (root.TryGetProperty("reply_message", out var replyMessage))
+        {
+            return ExtractSummary(replyMessage);
+        }
+
+        return string.Empty;
+    }
+
+    private static string ExtractSummary(JsonElement value)
+    {
+        if (value.ValueKind == JsonValueKind.Array)
+        {
+            var lines = value
+                .EnumerateArray()
+                .Where(x => x.ValueKind == JsonValueKind.String)
+                .Select(x => x.GetString())
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Select(x => $"- {x!.Trim()}")
+                .ToList();
+
+            return string.Join("\n", lines);
+        }
+
+        var asText = value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : value.ToString();
+
+        return asText?.Trim() ?? string.Empty;
+    }
+
+    private sealed record SummarizeResult(bool IsMedical, string DocumentType, string Summary)
+    {
+        public static SummarizeResult Empty => new(true, "medical report", string.Empty);
     }
 
     private static string CleanExtractedText(string text)
