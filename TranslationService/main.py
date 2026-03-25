@@ -611,6 +611,59 @@ Report:
     except Exception:
         return {"summary": ""}
 
+
+# ------------------------
+# Analyze (called by C# SymptomAnalysisGateway)
+# ------------------------
+class AnalyzeRequest(BaseModel):
+    text: str
+    session_id: str = "symptom-analysis"
+
+
+@app.post("/analyze")
+async def analyze(request: AnalyzeRequest):
+    """
+    Symptom analysis endpoint called by ClinicQueue.Infrastructure.ExternalServices.AI.SymptomAnalysisGateway.
+    Accepts free-text symptoms (any language), runs triage via the LLM, and returns a structured
+    response matching the C# SymptomAnalysisResponse contract.
+    """
+    user_text = request.text.strip()
+
+    # Detect and normalise to English
+    detected_lang = detect_language(user_text)
+    english_text = user_text
+    if detected_lang != "eng_Latn":
+        logger.info(f"[ANALYZE] Translating {detected_lang} -> eng_Latn")
+        english_text = await asyncio.to_thread(run_translation, user_text, detected_lang, "eng_Latn")
+
+    # Use existing call_qwen with a symptom-focused preamble
+    symptom_prompt = f"Patient symptoms: {english_text}"
+    ai_output = await asyncio.to_thread(call_qwen, symptom_prompt, [])
+
+    # Map LLM extracted_entities into the SymptomAnalysisGateway contract
+    entities = ai_output.get("extracted_entities", {})
+    specialty = entities.get("specialty_needed") or "General Physician"
+    intent = ai_output.get("intent", "Triage_Ongoing")
+
+    # Derive a simple severity estimate from intent stage
+    severity_map = {
+        "Triage_Complete": "Moderate",
+        "Booking_InProgress": "Moderate",
+        "Booking_Confirmed": "Low",
+    }
+    severity = severity_map.get(intent, "Low")
+
+    reasoning = ai_output.get("reply_message", "")
+    confidence = 0.85 if specialty != "General Physician" else 0.65
+
+    return {
+        "recommendedSpecialty": specialty,
+        "severity": severity,
+        "reasoning": reasoning,
+        "confidence": confidence,
+        "detectedLanguage": detected_lang,
+    }
+
 # ------------------------
 # Reset
 # ------------------------

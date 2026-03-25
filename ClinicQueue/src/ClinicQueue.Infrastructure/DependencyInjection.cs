@@ -46,14 +46,14 @@ public static class DependencyInjection
 
         services.AddHttpClient<ISymptomAnalysisGateway, SymptomAnalysisGateway>(client =>
         {
-            var baseUrl = configuration["AI:SymptomServiceUrl"] ?? "http://localhost:5001";
+            var baseUrl = configuration["AI:TranslationServiceUrl"] ?? "http://localhost:8000";
             client.BaseAddress = new Uri(baseUrl);
             client.Timeout = TimeSpan.FromSeconds(150);
         });
 
         services.AddHttpClient<IConversationAiGateway, ConversationAiGateway>(client =>
         {
-            var baseUrl = configuration["AI:SymptomServiceUrl"] ?? "http://localhost:5001";
+            var baseUrl = configuration["AI:TranslationServiceUrl"] ?? "http://localhost:8000";
             client.BaseAddress = new Uri(baseUrl);
             client.Timeout = TimeSpan.FromSeconds(150);
         });
@@ -80,14 +80,14 @@ public static class DependencyInjection
 
         services.AddHttpClient<IReportSummaryGateway, ReportSummaryGateway>(client =>
         {
-            var baseUrl = configuration["AI:ReportSummaryUrl"] ?? "http://localhost:5001";
+            var baseUrl = configuration["AI:TranslationServiceUrl"] ?? "http://localhost:8000";
             client.BaseAddress = new Uri(baseUrl);
             client.Timeout = TimeSpan.FromSeconds(90);
         });
 
         services.AddHttpClient<ITranslationClient, TranslationClient>(client =>
         {
-            var baseUrl = configuration["AI:TranslationServiceUrl"] ?? "http://localhost:5001";
+            var baseUrl = configuration["AI:TranslationServiceUrl"] ?? "http://localhost:8000";
             client.BaseAddress = new Uri(baseUrl);
             client.Timeout = TimeSpan.FromSeconds(60);
         });

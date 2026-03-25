@@ -156,17 +156,25 @@ app = FastAPI(
 #      Our .NET backend runs on a different port, so we need to allow it
 # HOW: Add middleware that adds appropriate headers to responses
 
+# CORS: read allowed origins from env (comma-separated) so this works in dev and prod
+# without code changes. Default covers the .NET backend and both common React dev servers.
+_raw_origins = os.environ.get("ALLOWED_ORIGINS", "")
+ALLOWED_ORIGINS: list[str] = (
+    [o.strip() for o in _raw_origins.split(",") if o.strip()]
+    if _raw_origins
+    else [
+        "http://localhost:5000",   # .NET backend
+        "http://localhost:5173",   # React frontend (Vite)
+        "http://localhost:3000",   # React frontend (CRA)
+    ]
+)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5000",      # .NET backend
-        "http://localhost:5173",      # React frontend (Vite)
-        "http://localhost:3000",      # React frontend (CRA)
-        "*"                           # Allow all (for development only!)
-    ],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],              # Allow all HTTP methods (GET, POST, etc.)
-    allow_headers=["*"],              # Allow all headers
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 

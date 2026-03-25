@@ -27,7 +27,8 @@ public class WhatsAppBotProcessor(
     IConfiguration configuration,
     ILogger<WhatsAppBotProcessor> logger) : IWhatsAppBotProcessor
 {
-    private const string SummarizeEndpoint = "http://localhost:5001/summarize";
+    // Supported media upload type prefixes sent by the WhatsApp webhook adapter
+    private static readonly string[] KnownUploadPrefixes = ["IMAGE_UPLOAD:", "PDF_UPLOAD:"];
     private readonly int _lookAheadDays = GetPositiveInt(configuration["ClinicSettings:BookingWindowDays"], 7);
     private readonly int _reminderMinutesBefore = GetPositiveInt(configuration["ClinicSettings:ReminderMinutesBefore"], 10);
 
@@ -43,6 +44,14 @@ public class WhatsAppBotProcessor(
         if (string.Equals(input.Trim(), "DOC_UNSUPPORTED", StringComparison.OrdinalIgnoreCase))
         {
             await SendTextAsync(from, "Please upload a PDF or image file only.", cancellationToken);
+            return;
+        }
+
+        // Reject unsupported upload types (audio, video, stickers, etc.) gracefully
+        if (input.Contains("_UPLOAD:", StringComparison.OrdinalIgnoreCase)
+            && !KnownUploadPrefixes.Any(p => input.StartsWith(p, StringComparison.OrdinalIgnoreCase)))
+        {
+            await SendTextAsync(from, "Sorry, I can only read PDF and image files. Please upload a JPG, PNG, or PDF.", cancellationToken);
             return;
         }
 
@@ -238,8 +247,9 @@ public class WhatsAppBotProcessor(
                 return;
             }
 
-            var summarizeResponse = await SummarizeDocumentAsync(cleanedText, to, cancellationToken);
-            var summaryText = summarizeResponse.Summary;
+            // Use the injected IReportSummaryGateway (config-driven, no hardcoded URLs)
+            var summaryResult = await reportSummaryGateway.GenerateSummaryAsync(cleanedText, cancellationToken);
+            var summaryText = summaryResult.IsSuccess ? summaryResult.Value : null;
 
             if (string.IsNullOrWhiteSpace(summaryText) || IsLowQualitySummaryReply(summaryText))
             {
@@ -377,147 +387,9 @@ public class WhatsAppBotProcessor(
         return hits >= 2;
     }
 
-    private async Task<SummarizeResult> SummarizeDocumentAsync(string extractedText, string phoneNumber, CancellationToken cancellationToken)
-    {
-        try
-        {
-            using var httpClient = new HttpClient();
-            var summarizeRequest = new
-            {
-                text = extractedText,
-                session_id = phoneNumber
-            };
+    // SummarizeDocumentAsync removed — replaced by IReportSummaryGateway.GenerateSummaryAsync
 
-            using var response = await httpClient.PostAsJsonAsync(SummarizeEndpoint, summarizeRequest, cancellationToken);
-            if (!response.IsSuccessStatusCode)
-            {
-                logger.LogWarning("Summarize endpoint failed with status {StatusCode} for {Phone}", response.StatusCode, phoneNumber);
-                return SummarizeResult.Empty;
-            }
 
-            await using var responseStream = await response.Content.ReadAsStreamAsync(cancellationToken);
-            using var json = await JsonDocument.ParseAsync(responseStream, cancellationToken: cancellationToken);
-
-            return ParseSummarizeResponse(json.RootElement);
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning(ex, "Summarize endpoint call failed for {Phone}", phoneNumber);
-            return SummarizeResult.Empty;
-        }
-    }
-
-    private static SummarizeResult ParseSummarizeResponse(JsonElement root)
-    {
-        var isMedical = ReadBooleanLikeValue(root, "is_medical")
-            ?? ReadBooleanLikeValue(root, "IS_MEDICAL")
-            ?? true;
-
-        var documentType = ReadStringValue(root, "documentType")
-            ?? ReadStringValue(root, "document_type")
-            ?? ReadStringValue(root, "type")
-            ?? ReadStringValue(root, "TYPE")
-            ?? "medical report";
-
-        var summary = ReadSummaryValue(root);
-
-        return new SummarizeResult(isMedical, documentType, summary);
-    }
-
-    private static bool? ReadBooleanLikeValue(JsonElement root, string propertyName)
-    {
-        if (!root.TryGetProperty(propertyName, out var value))
-        {
-            return null;
-        }
-
-        return value.ValueKind switch
-        {
-            JsonValueKind.True => true,
-            JsonValueKind.False => false,
-            JsonValueKind.String => ParseBooleanText(value.GetString()),
-            _ => null,
-        };
-    }
-
-    private static bool? ParseBooleanText(string? value)
-    {
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            return null;
-        }
-
-        var lowered = value.Trim().ToLowerInvariant();
-        return lowered switch
-        {
-            "yes" => true,
-            "true" => true,
-            "medical" => true,
-            "no" => false,
-            "false" => false,
-            "non-medical" => false,
-            _ => null,
-        };
-    }
-
-    private static string? ReadStringValue(JsonElement root, string propertyName)
-    {
-        if (!root.TryGetProperty(propertyName, out var value))
-        {
-            return null;
-        }
-
-        return value.ValueKind == JsonValueKind.String
-            ? value.GetString()
-            : value.ToString();
-    }
-
-    private static string ReadSummaryValue(JsonElement root)
-    {
-        if (root.TryGetProperty("summary", out var summary))
-        {
-            return ExtractSummary(summary);
-        }
-
-        if (root.TryGetProperty("SUMMARY", out var uppercaseSummary))
-        {
-            return ExtractSummary(uppercaseSummary);
-        }
-
-        if (root.TryGetProperty("reply_message", out var replyMessage))
-        {
-            return ExtractSummary(replyMessage);
-        }
-
-        return string.Empty;
-    }
-
-    private static string ExtractSummary(JsonElement value)
-    {
-        if (value.ValueKind == JsonValueKind.Array)
-        {
-            var lines = value
-                .EnumerateArray()
-                .Where(x => x.ValueKind == JsonValueKind.String)
-                .Select(x => x.GetString())
-                .Where(x => !string.IsNullOrWhiteSpace(x))
-                .Select(x => $"- {x!.Trim()}")
-                .ToList();
-
-            return string.Join("\n", lines);
-        }
-
-        var asText = value.ValueKind == JsonValueKind.String
-            ? value.GetString()
-            : value.ToString();
-
-        return asText?.Trim() ?? string.Empty;
-    }
-
-    private sealed record SummarizeResult(bool IsMedical, string DocumentType, string Summary)
-    {
-        public static SummarizeResult Empty => new(true, "medical report", string.Empty);
-    }
 
     private static string CleanExtractedText(string text)
     {
