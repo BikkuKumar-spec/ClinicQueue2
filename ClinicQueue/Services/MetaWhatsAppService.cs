@@ -9,7 +9,7 @@ namespace ClinicQueue.Services
     public class MetaWhatsAppService : IMetaWhatsAppService
     {
         private readonly string _phoneNumberId;
-        private readonly string _accessToken;
+        private readonly string _accessToken = string.Empty;
         private readonly string _apiVersion;
         private readonly HttpClient _httpClient;
         private readonly DatabaseService _db;
