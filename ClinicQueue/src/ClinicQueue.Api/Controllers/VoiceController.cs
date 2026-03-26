@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.Mvc;
 using System.Text.RegularExpressions;
 
 namespace ClinicQueue.API.Controllers;
+using ClinicQueue.Domain.Entities;
 
 [ApiController]
 [Route("api/voice")]
