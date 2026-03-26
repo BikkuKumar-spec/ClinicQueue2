@@ -6,6 +6,11 @@ using ClinicQueue.Infrastructure;
 using ClinicQueue.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
+using ClinicQueue.Infrastructure.ExternalServices.AI;
+using Microsoft.Extensions.Http.Resilience;
+using Polly;
+using Polly.Retry;
+using Polly.Timeout;
 
 var builder = WebApplication.CreateBuilder(new WebApplicationOptions
 {
@@ -51,6 +56,15 @@ builder.Services.AddSignalR();
 
 builder.Services.AddApplication();
 builder.Services.AddInfrastructure(builder.Configuration);
+// Use this version to avoid the ValidationException
+builder.Services.AddHttpClient<IConversationAiGateway, ConversationAiGateway>()
+    .RemoveAllLoggers()
+    .AddResilienceHandler("ai-handler", pipeline => {
+        // We skip AddRetry entirely so it defaults to 0 retries (standard HttpClient behavior)
+
+        // Only keep the Timeout so the request doesn't hang forever
+        pipeline.AddTimeout(TimeSpan.FromSeconds(100));
+    });
 
 builder.Services
     .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
