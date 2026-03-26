@@ -25,6 +25,7 @@ OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://10.30.1.34:11434")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.1:8b")
 HF_TOKEN = os.environ.get("HF_TOKEN", None)
 REPORT_SUMMARY_TRIGGER = "[REPORT_SUMMARY]"
+CLINIC_API_BASE_URL = os.environ.get("CLINIC_API_BASE_URL", "http://localhost:5000")
 
 app = FastAPI(title="Indic Translation Service + Hinglish Support")
 
@@ -55,26 +56,83 @@ LANGID_TO_INDIC = {
     "hi": "hin_Deva",
 }
 
-ALLOWED_SPECIALTIES = [
-    "General Physician",
-    "Dermatologist",
-    "Pediatrician",
-    "Orthopedist",
-    "ENT Specialist"
-]
-ALLOWED_DOCTORS = [
-    "Dr. Suresh (General Physician)",
-    "Dr. Mukesh (General Physician)",
-    "Dr. Akash (Dermatologist)",
-    "Dr. Ajay (Dermatologist)",
-    "Dr. Beena (Pediatrician)",
-    "Dr. Kavya (Pediatrician)",
-    "Dr. Raj (Orthopedist)",
-    "Dr. Kumar (Orthopedist)",
-    "Dr. Priya (ENT Specialist)",
-    "Dr. Anil (ENT Specialist)"
-]
+# Dynamic lists - will be populated from API
+ALLOWED_SPECIALTIES = []
+ALLOWED_DOCTORS = []
+DOCTORS_BY_SPECIALTY = {}  # For grouping doctors by specialty
+
 NO_TRANSLATE_FIELDS = {"intent", "specialty_needed", "preferred_doctor", "preferred_date", "preferred_time", "patient_name", "missing_info"}
+
+# ------------------------
+# Language Detection Helpers
+# ------------------------
+
+def has_devanagari(text: str) -> bool:
+    """Returns True if the text contains any Devanagari characters."""
+    return any("\u0900" <= ch <= "\u097F" for ch in text)
+
+
+# ------------------------
+# Fetch Doctors and Specialties from API
+# ------------------------
+async def fetch_doctors_and_specialties():
+    """Fetch doctors and specialties from the ClinicQueue API at startup."""
+    global ALLOWED_SPECIALTIES, ALLOWED_DOCTORS, DOCTORS_BY_SPECIALTY
+    
+    try:
+        # Fetch specialties
+        spec_url = f"{CLINIC_API_BASE_URL}/api/doctors/specialties"
+        logger.info(f"[FETCH] Fetching specialties from {spec_url}")
+        spec_response = requests.get(spec_url, timeout=10)
+        
+        if spec_response.ok:
+            specialties = spec_response.json()
+            if isinstance(specialties, list):
+                ALLOWED_SPECIALTIES = specialties
+                logger.info(f"[FETCH] Successfully loaded {len(ALLOWED_SPECIALTIES)} specialties")
+            else:
+                logger.warning("[FETCH] Unexpected specialties response format")
+        else:
+            logger.warning(f"[FETCH] Failed to fetch specialties: {spec_response.status_code}")
+        
+        # Fetch doctors
+        doctors_url = f"{CLINIC_API_BASE_URL}/api/doctors"
+        logger.info(f"[FETCH] Fetching doctors from {doctors_url}")
+        doctors_response = requests.get(doctors_url, timeout=10)
+        
+        if doctors_response.ok:
+            doctors_data = doctors_response.json()
+            if isinstance(doctors_data, list):
+                # Format doctors for display: "Dr. Name (Specialty)"
+                doctor_list = []
+                doctors_by_spec = {}
+                
+                for doctor in doctors_data:
+                    doctor_name = doctor.get("name", "")
+                    specialty = doctor.get("specialty", "")
+                    
+                    if doctor_name:
+                        formatted = f"{doctor_name} ({specialty})" if specialty else doctor_name
+                        doctor_list.append(formatted)
+                        
+                        # Group by specialty
+                        if specialty not in doctors_by_spec:
+                            doctors_by_spec[specialty] = []
+                        doctors_by_spec[specialty].append(doctor_name)
+                
+                ALLOWED_DOCTORS = doctor_list
+                DOCTORS_BY_SPECIALTY = doctors_by_spec
+                logger.info(f"[FETCH] Successfully loaded {len(ALLOWED_DOCTORS)} doctors")
+            else:
+                logger.warning("[FETCH] Unexpected doctors response format")
+        else:
+            logger.warning(f"[FETCH] Failed to fetch doctors: {doctors_response.status_code}")
+    
+    except Exception as e:
+        logger.error(f"[FETCH] Error fetching doctors/specialties: {e}")
+        # Fallback to empty lists - will be populated on next attempt
+        logger.info("[FETCH] Will retry on next startup if API becomes available")
+
 
 # ------------------------
 # Language Detection Helpers
@@ -88,27 +146,42 @@ def has_devanagari(text: str) -> bool:
 # ------------------------
 # MASTER SYSTEM PROMPT
 # ------------------------
-current_datetime = datetime.now().strftime("%Y-%m-%d %H:%M")
-
-SYSTEM_PROMPT = """You are the Senior Medical Receptionist/AI Assistant for Dr. Sharma's Clinic.
+SYSTEM_PROMPT_TEMPLATE = """You are the Senior Medical Receptionist/AI Assistant for Dr. Sharma's Clinic.
 Your goal is to provide a 100% natural conversation experience via WhatsApp. 
 You guide patients through triage, specialty recommendation, doctor selection, and appointment booking.
 
 ### GUIDELINES:
 1. **Tone**: Professional, empathetic, and efficient.
-2. **Behavior**: 
+2. **Session Start**: 
+   - If patient name is already known (from database), use "Returning patient rule" at the VERY START of conversation.
+   - If patient name is NOT known, skip returning patient logic and go directly to normal greeting.
+3. **Behavior**: 
    - Start by greeting the user and asking for their symptoms if they haven't provided any.
    - Perform triage by asking 3-4 medically relevant follow-up questions.
    - Once triage is done, recommend a specialty from the ALLOWED_SPECIALTIES list.
    - Offer specific doctors from the ALLOWED_DOCTORS list based on the specialty.
    - Negotiate date and time naturally (Today, Tomorrow, or specific dates/times).
-   - Once all details (Patient Name, Doctor, Date, Time) are gathered, confirm the booking.
-3. **Language**: You will receive input in English and must output in English. (Translation is handled externally).
-4. **Name before confirmation**:
+   - Ask for patient name BEFORE confirming (if not already known).
+   - Once ALL details (Patient Name, Doctor, Date, Time) are gathered, IMMEDIATELY respond with Booking_Confirmed intent and a clear confirmation message.
+4. **Language**: You will receive input in English and must output in English. (Translation is handled externally).
+4. **Name before confirmation** (CRITICAL):
     - ALWAYS ask patient name before confirming any booking.
     - Example: "May I have your name please?"
     - Never confirm without getting name.
-5. **Slot suggestion rule**:
+    - When patient provides their name, IMMEDIATELY extract and use it in the extracted_entities.patient_name field.
+    - Do NOT leave patient_name empty if patient has said their name in the conversation.
+5. **Confirmation Rule** (CRITICAL):
+    - When you have ALL details (patient_name, preferred_doctor, preferred_date, preferred_time), IMMEDIATELY set:
+      - intent: "Booking_Confirmed"
+      - reply_message: "Done! Appointment booked with Dr. [DocName] on [Date] at [Time]. See you then! 🏥"
+    - Example correct format with full details:
+      "Done! Appointment booked with Dr. Mukesh on Tomorrow (26-Mar) at 9:00 AM. See you then! 🏥"
+      OR
+      "Done! Appointment confirmed: Dr. Mukesh | [Date] | [Time Slot]. Thanks! 🏥"
+    - ALWAYS include: Doctor Name + Date + Time Slot in confirmation
+    - NEVER ask anything else after Booking_Confirmed.
+    - NEVER restart the conversation after booking.
+6. **Slot suggestion rule**:
     - NEVER suggest 2 PM as a default slot.
     - Always suggest the next available slot based on current time.
     - Use Current Date and Time in this prompt to decide slot timing.
@@ -120,20 +193,33 @@ You guide patients through triage, specialty recommendation, doctor selection, a
     - Never book a slot that has already passed today.
     - If user says "today" but it is after 5 PM, reply exactly:
       "Clinic is closed for today. Earliest slot is tomorrow at 9 AM."
-7. **Returning patient rule**:
-    - When a patient contacts who has booked before, greet them by name.
-    - Then ask: "Welcome back [name]! Shall I book for you or someone else like a family member?"
-    - If they say yes or book or confirm, book for the registered patient.
-    - If they say no or someone else or family or wife or child etc, ask:
-      "Who would you like to book for? Please share their name."
-    - Collect the new person name.
-    - Book appointment under that name.
-    - Keep it linked to the same phone number.
+7. **Returning patient rule** (ONLY at SESSION START):
+    - If patient name is ALREADY KNOWN from database at the START of conversation:
+    - Greet them by name and ask: "Welcome back [name]! Shall I book for you or someone else like a family member?"
+    - If they say yes/confirm/book: Book appointment under their registered name.
+    - If they say no/family/someone else: Ask "Who would you like to book for? Please share their name."
+    - Then collect the new person's name and book under that name.
+    - CRITICAL: When booking for family member, ALWAYS use the family member's name (NOT the original patient's name).
+    - Extract the family member name and set it in extracted_entities.patient_name.
+    - IMPORTANT: Only use this logic once, at the START. Do not repeat this question mid-booking.
+    - Example: If Rajesh's phone books for his sister Priya, extracted_entities.patient_name MUST be "Priya", not "Rajesh".
 8. **New patient rule**:
     - If patient has not booked before, always ask their name before booking.
     - Ask: "May I have your name please?"
     - Never confirm booking without name.
     - Use extracted_entities.patient_name for whoever the booking is for (registered patient or family member).
+
+### FAMILY MEMBER BOOKING RULE (CRITICAL):
+- When same phone number books for DIFFERENT family members, ALWAYS ask:
+  - "Who should I book this appointment for?" or "What's the name of the person for this appointment?"
+  - Capture the ACTUAL name of the person getting the appointment
+  - Set extracted_entities.patient_name to that person's name (NOT the original caller's name)
+  - Example: If Rajesh (who booked before) now books for his sister Priya:
+    - AI asks: "Is this still for you, Rajesh, or for someone else?"
+    - Rajesh says: "No, it's for my sister Priya"
+    - AI MUST set extracted_entities.patient_name = "Priya" (NOT "Rajesh")
+    - Confirmation: "Done! Appointment booked for Priya with Dr. Mukesh on 26-Mar at 9:00 AM 🏥"
+- CRITICAL: extracted_entities.patient_name must always reflect the person GETTING the appointment, not the person calling.
 
 ### STRICT REPLY RULES:
 - Maximum 2 sentences per reply.
@@ -142,11 +228,13 @@ You guide patients through triage, specialty recommendation, doctor selection, a
 - No disclaimers or legal-style text.
 - No 'please don't hesitate to reach out'.
 - No 'we look forward to seeing you'.
-- Confirmation must be ONE short message.
-- Example good confirmation:
-    'Done! Dr. Mukesh at 3:00 PM today. See you then!'
-- Example bad confirmation:
+- **Confirmation must include: Doctor Name + Date + Time Slot** in ONE message.
+- **After Booking_Confirmed, DO NOT ask "How can I help?" or restart conversation.**- **CRITICAL: patient_name in extracted_entities must be set to the ACTUAL patient name from the conversation, NOT null or empty.**- Example CORRECT confirmation with full details:
+    'Done! Appointment booked with Dr. Mukesh on Tomorrow (26-Mar) at 9:00 AM. See you then! 🏥'
+    'Confirmed: Dr. Mukesh | 26-Mar-2026 | 9:00 AM. Thanks! 🏥'
+- Example WRONG confirmation (Don't do this):
     'Your appointment is confirmed. Please arrive 15 minutes early. If you have questions contact us. Details: Name...'
+    'Done! Dr. Mukesh tomorrow at 9:00 AM' (missing full date)
 - Ask ONE thing at a time only.
 - Never list appointment details in long format.
 
@@ -186,7 +274,27 @@ GOOD:
 "Sounds like you need a General Physician.
  Dr. Suresh free tomorrow. Shall I book?"
 
-### KNOWLEDGE BASE:
+### CRITICAL BOOKING STATE RULES:
+- **Patient Name Extraction (MANDATORY)**: 
+  - If patient has mentioned their name at ANY point in the conversation, it MUST be captured in extracted_entities.patient_name.
+  - For family members: The name MUST be the family member's name (person getting appointment), NOT the contact person's name.
+  - Example: If Rajesh calls to book for his sister Priya, patient_name = "Priya" (NOT "Rajesh")
+  - Example: If patient says "Hi, I'm Rajesh" or "My name is Priya", extract "Rajesh" or "Priya" into the patient_name field immediately.
+  - NEVER allow patient_name to be null if the patient has provided their name.
+  - If name not yet provided, keep asking until you get it before booking.
+- **missing_info** field shows what's still needed:
+  - When missing_info is empty [] → Booking is READY to confirm → Set intent to "Booking_Confirmed"
+  - When you set intent to "Booking_Confirmed", IMMEDIATELY respond with confirmation message (ONE sentence max)
+  - NEVER transition from Booking_Confirmed back to Booking_InProgress
+  - NEVER ask "How can I help you today?" after Booking_Confirmed
+- Example correct flow with FULL DATE & TIME SLOT:
+  1. User: "Ohk done" (confirming all details)
+  2. AI checks: patient_name=Kuldeep, doctor=Dr. Mukesh, date=26-Mar-2026, time=9:00 AM ✓
+  3. AI sets missing_info: [] (empty)
+  4. AI sets intent: "Booking_Confirmed"
+  5. AI MUST set extracted_entities.patient_name to "Kuldeep" (NOT null!)
+  6. AI replies: "Done! Appointment booked with Dr. Mukesh on 26-Mar at 9:00 AM. See you then! 🏥"
+  7. **END OF CONVERSATION** - Do NOT ask anything more.
 - **Allowed Specialties**: {specialties}
 - **Allowed Doctors**: {doctors}
 
@@ -207,11 +315,16 @@ Schema:
 }}
 
 Current Date and Time: {current_datetime}
-""".format(
-    specialties=", ".join(ALLOWED_SPECIALTIES),
-    doctors=", ".join(ALLOWED_DOCTORS),
-    current_datetime=current_datetime
-)
+"""
+
+def get_system_prompt():
+    """Generate the system prompt with current doctors and specialties."""
+    current_datetime = datetime.now().strftime("%Y-%m-%d %H:%M")
+    return SYSTEM_PROMPT_TEMPLATE.format(
+        specialties=", ".join(ALLOWED_SPECIALTIES) if ALLOWED_SPECIALTIES else "No specialties loaded",
+        doctors=", ".join(ALLOWED_DOCTORS) if ALLOWED_DOCTORS else "No doctors loaded",
+        current_datetime=current_datetime
+    )
 
 REPORT_SUMMARY_SYSTEM_PROMPT = """You are a medical report summarization assistant.
 Your task is to summarize uploaded lab/medical report text for a patient in plain, easy English.
@@ -314,6 +427,8 @@ def load_models():
 @app.on_event("startup")
 async def startup_event():
     langid.set_languages(SUPPORTED_LANGS)
+    logger.info("Service Starting — fetching doctors and specialties from API...")
+    await fetch_doctors_and_specialties()
     logger.info("Service Ready — models will load on first translation request.")
 
 # ------------------------
@@ -471,7 +586,7 @@ def call_qwen(user_message: str, history):
         if is_report_summary_mode:
             effective_user_message = user_message[len(REPORT_SUMMARY_TRIGGER):].strip()
 
-        system_prompt = REPORT_SUMMARY_SYSTEM_PROMPT if is_report_summary_mode else SYSTEM_PROMPT
+        system_prompt = REPORT_SUMMARY_SYSTEM_PROMPT if is_report_summary_mode else get_system_prompt()
 
         messages = [{"role": "system", "content": system_prompt}]
         if not is_report_summary_mode:
@@ -505,7 +620,32 @@ def call_qwen(user_message: str, history):
         content = resp_json["message"]["content"]
         logger.info(f"[OLLAMA CONTENT] {content}")
         
-        parsed = json.loads(content)
+        # Try to parse as single JSON first
+        parsed = None
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError:
+            # If single parse fails, try to extract valid JSON objects
+            # Handle case where Ollama returns multiple JSON objects
+            import re
+            json_matches = re.findall(r'\{[^{}]*\}', content)
+            if json_matches:
+                # Try to parse each found JSON object
+                for json_str in json_matches:
+                    try:
+                        obj = json.loads(json_str)
+                        if obj.get("intent") == "Booking_Confirmed":
+                            parsed = obj
+                            logger.info(f"[OLLAMA] Found Booking_Confirmed in multiple responses, using that")
+                            break
+                        elif parsed is None:
+                            parsed = obj
+                    except:
+                        continue
+        
+        if parsed is None:
+            logger.error(f"[OLLAMA] Could not parse response content: {content}")
+            return {"stage": "questioning", "question": "Please describe your symptoms clearly."}
 
         if is_report_summary_mode:
             return sanitize_ai_output(normalize_report_summary_output(parsed))
@@ -554,6 +694,12 @@ async def chat(request: ChatRequest):
         logger.info(f"[TRANSLATE RESULT] {english_input}")
 
     english_output = await asyncio.to_thread(call_qwen, english_input, list(history))
+
+    # Critical: If booking is confirmed, ensure no other intent breaks the flow
+    if english_output.get("intent") == "Booking_Confirmed":
+        # Strip missing_info to signal completion
+        english_output["missing_info"] = []
+        logger.info(f"[BOOKING] Confirmed - preventing further state changes")
 
     history.append({"role": "user", "content": english_input})
     history.append({"role": "assistant", "content": json.dumps(english_output)})
@@ -655,5 +801,7 @@ async def health_check():
         "status": "ok",
         "model": OLLAMA_MODEL,
         "models_loaded": models_loaded,
-        "allowed_specialties": ALLOWED_SPECIALTIES
+        "allowed_specialties": ALLOWED_SPECIALTIES,
+        "allowed_doctors_count": len(ALLOWED_DOCTORS),
+        "api_base_url": CLINIC_API_BASE_URL
     }

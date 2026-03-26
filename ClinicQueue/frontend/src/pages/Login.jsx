@@ -94,7 +94,7 @@ export default function Login() {
 
                 <div className="mt-6 text-center text-sm text-gray-400">
                     <p>Demo Credentials:</p>
-                    <p>User: assistant / Pass: clinic123</p>
+                    <p>User: admin / Pass: Admin@123</p>
                 </div>
             </div>
         </div>

@@ -19,6 +19,9 @@ public sealed class CreateAppointmentCommandHandler(
     IRequestValidator<CreateAppointmentCommand> validator)
     : IRequestHandler<CreateAppointmentCommand, Result<AppointmentDto>>
 {
+    private const int MaxBookingsPerSlotBatch = 5;
+    private const int SlotBatchMinutes = 30;
+
     public async Task<Result<AppointmentDto>> Handle(CreateAppointmentCommand request, CancellationToken cancellationToken)
     {
         var errors = validator.Validate(request);
@@ -35,6 +38,17 @@ public sealed class CreateAppointmentCommandHandler(
         if (!available)
         {
             return Result<AppointmentDto>.Failure("Selected slot is not available.");
+        }
+
+        var bookedInBatch = await appointmentRepository.GetActiveBookingCountInSlotBatchAsync(
+            request.DoctorId,
+            request.SlotTime,
+            SlotBatchMinutes,
+            cancellationToken);
+
+        if (bookedInBatch >= MaxBookingsPerSlotBatch)
+        {
+            return Result<AppointmentDto>.Failure("Selected slot is full. Please choose another time.");
         }
 
         var appointment = Appointment.Create(request.PatientId, request.DoctorId, request.SlotTime);

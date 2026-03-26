@@ -121,6 +121,37 @@ public class AppointmentRepository(ClinicDbContext dbContext)
         return !occupied;
     }
 
+    public async Task<int> GetActiveBookingCountInSlotBatchAsync(
+        string doctorId,
+        DateTime slotTime,
+        int batchMinutes,
+        CancellationToken cancellationToken = default)
+    {
+        if (batchMinutes <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(batchMinutes), "Batch duration must be greater than zero.");
+        }
+
+        var batchStart = new DateTime(
+            slotTime.Year,
+            slotTime.Month,
+            slotTime.Day,
+            slotTime.Hour,
+            (slotTime.Minute / batchMinutes) * batchMinutes,
+            0,
+            slotTime.Kind);
+        var batchEnd = batchStart.AddMinutes(batchMinutes);
+
+        return await DbSet
+            .AsNoTracking()
+            .CountAsync(
+                x => x.DoctorId == doctorId
+                    && x.SlotTime >= batchStart
+                    && x.SlotTime < batchEnd
+                    && x.Status != AppointmentStatus.Cancelled,
+                cancellationToken);
+    }
+
     public async Task<DateTime?> GetNextAvailableSlotAsync(
         string doctorId,
         DateTime fromTime,

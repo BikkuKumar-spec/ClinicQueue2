@@ -48,7 +48,8 @@ public sealed class JoinQueueCommandHandler(
         var queueEntry = QueueEntry.Create(request.AppointmentId, request.PriorityScore);
         queueEntry.MoveToPosition(position);
 
-        appointment.Confirm();
+        // REMOVED auto-confirm: appointment.Confirm();
+        // Patients should only be marked as arrived when clinic assistant manually clicks "Arrive" button
         appointment.AssignQueuePosition(position);
 
         await queueRepository.AddAsync(queueEntry, cancellationToken);

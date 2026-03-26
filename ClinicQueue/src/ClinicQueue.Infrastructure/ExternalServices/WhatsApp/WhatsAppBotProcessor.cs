@@ -30,6 +30,8 @@ public class WhatsAppBotProcessor(
     private const string SummarizeEndpoint = "http://localhost:5001/summarize";
     private readonly int _lookAheadDays = GetPositiveInt(configuration["ClinicSettings:BookingWindowDays"], 7);
     private readonly int _reminderMinutesBefore = GetPositiveInt(configuration["ClinicSettings:ReminderMinutesBefore"], 10);
+    private const int MaxBookingsPerSlotBatch = 5;
+    private const int SlotBatchMinutes = 30;
 
     public async Task ProcessMessageAsync(string from, string input, CancellationToken cancellationToken = default)
     {
@@ -72,6 +74,10 @@ public class WhatsAppBotProcessor(
                 {
                     await conversationAiGateway.ResetSessionAsync(from, cancellationToken);
                 }
+                else
+                {
+                    replyMessage = "That slot is full or unavailable. Please choose another time.";
+                }
             }
 
             await SendTextAsync(from, replyMessage, cancellationToken);
@@ -89,7 +95,7 @@ public class WhatsAppBotProcessor(
         {
             var patient = await patientRepository.GetOrCreateByPhoneNumberAsync(
                 phoneNumber,
-                entities.PatientName ?? "Patient",
+                entities.PatientName ?? phoneNumber,
                 cancellationToken);
 
             Doctor? doctor = null;
@@ -122,6 +128,22 @@ public class WhatsAppBotProcessor(
             if (slotTime < now || slotTime > maxDate)
             {
                 logger.LogWarning("Slot {Slot} outside valid booking window.", slotTime);
+                return false;
+            }
+
+            var bookedInBatch = await appointmentRepository.GetActiveBookingCountInSlotBatchAsync(
+                doctor.Id,
+                slotTime,
+                SlotBatchMinutes,
+                cancellationToken);
+
+            if (bookedInBatch >= MaxBookingsPerSlotBatch)
+            {
+                logger.LogWarning(
+                    "Slot batch is full for Doctor {DoctorId} at {Slot}. Current bookings: {Count}",
+                    doctor.Id,
+                    slotTime,
+                    bookedInBatch);
                 return false;
             }
 
@@ -235,6 +257,12 @@ public class WhatsAppBotProcessor(
             if (string.IsNullOrWhiteSpace(cleanedText))
             {
                 await SendTextAsync(to, "I could not find useful report text in that file. Please upload a clearer medical report image or PDF.", cancellationToken);
+                return;
+            }
+
+            if (!IsLikelyMedicalReport(cleanedText))
+            {
+                await SendTextAsync(to, "This is not a medical file.", cancellationToken);
                 return;
             }
 
