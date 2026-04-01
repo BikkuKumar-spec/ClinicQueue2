@@ -5,7 +5,7 @@ namespace ClinicQueue.Api.Common;
 
 public static class ControllerResultExtensions
 {
-    public static ActionResult ToActionResult<T>(this ControllerBase controller, Result<T> result)
+    public static ActionResult ToActionResult<T>(this ControllerBase controller, Result<T> result) //Flexible data type <T>
     {
         if (result.IsSuccess && result.Value is not null)
         {

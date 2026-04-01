@@ -10,7 +10,7 @@ from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 import langid
 import requests
 import json
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 # 🔥 NEW — Hinglish Support
 from indic_transliteration import sanscript
@@ -26,6 +26,7 @@ OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.1:8b")
 HF_TOKEN = os.environ.get("HF_TOKEN", None)
 REPORT_SUMMARY_TRIGGER = "[REPORT_SUMMARY]"
 CLINIC_API_BASE_URL = os.environ.get("CLINIC_API_BASE_URL", "http://localhost:5000")
+CLINIC_NAME = os.environ.get("CLINIC_NAME", "the clinic")
 
 app = FastAPI(title="Indic Translation Service + Hinglish Support")
 
@@ -60,6 +61,10 @@ LANGID_TO_INDIC = {
 ALLOWED_SPECIALTIES = []
 ALLOWED_DOCTORS = []
 DOCTORS_BY_SPECIALTY = {}  # For grouping doctors by specialty
+DOCTOR_CACHE_TTL_SECONDS = int(os.environ.get("DOCTOR_CACHE_TTL_SECONDS", "120"))
+
+_last_doctor_fetch_attempt_utc: Optional[datetime] = None
+_doctor_fetch_lock = asyncio.Lock()
 
 NO_TRANSLATE_FIELDS = {"intent", "specialty_needed", "preferred_doctor", "preferred_date", "preferred_time", "patient_name", "missing_info"}
 
@@ -134,6 +139,36 @@ async def fetch_doctors_and_specialties():
         logger.info("[FETCH] Will retry on next startup if API becomes available")
 
 
+async def ensure_doctor_catalog_loaded(force: bool = False):
+    """Ensure doctor/specialty catalog is available; retry fetch when empty or stale."""
+    global _last_doctor_fetch_attempt_utc
+
+    now_utc = datetime.utcnow()
+
+    has_catalog = bool(ALLOWED_SPECIALTIES) and bool(ALLOWED_DOCTORS)
+    recent_attempt = (
+        _last_doctor_fetch_attempt_utc is not None
+        and (now_utc - _last_doctor_fetch_attempt_utc).total_seconds() < DOCTOR_CACHE_TTL_SECONDS
+    )
+
+    if not force and has_catalog and recent_attempt:
+        return
+
+    async with _doctor_fetch_lock:
+        now_utc = datetime.utcnow()
+        has_catalog = bool(ALLOWED_SPECIALTIES) and bool(ALLOWED_DOCTORS)
+        recent_attempt = (
+            _last_doctor_fetch_attempt_utc is not None
+            and (now_utc - _last_doctor_fetch_attempt_utc).total_seconds() < DOCTOR_CACHE_TTL_SECONDS
+        )
+
+        if not force and has_catalog and recent_attempt:
+            return
+
+        _last_doctor_fetch_attempt_utc = now_utc
+        await fetch_doctors_and_specialties()
+
+
 # ------------------------
 # Language Detection Helpers
 # ------------------------
@@ -146,7 +181,7 @@ def has_devanagari(text: str) -> bool:
 # ------------------------
 # MASTER SYSTEM PROMPT
 # ------------------------
-SYSTEM_PROMPT_TEMPLATE = """You are the Senior Medical Receptionist/AI Assistant for Dr. Sharma's Clinic.
+SYSTEM_PROMPT_TEMPLATE = """You are the Senior Medical Receptionist/AI Assistant for {clinic_name}.
 Your goal is to provide a 100% natural conversation experience via WhatsApp. 
 You guide patients through triage, specialty recommendation, doctor selection, and appointment booking.
 
@@ -175,9 +210,9 @@ You guide patients through triage, specialty recommendation, doctor selection, a
       - intent: "Booking_Confirmed"
       - reply_message: "Done! Appointment booked with Dr. [DocName] on [Date] at [Time]. See you then! 🏥"
     - Example correct format with full details:
-      "Done! Appointment booked with Dr. Mukesh on Tomorrow (26-Mar) at 9:00 AM. See you then! 🏥"
+    "Done! Appointment booked with Dr. [Doctor Name] on Tomorrow (26-Mar) at 9:00 AM. See you then! 🏥"
       OR
-      "Done! Appointment confirmed: Dr. Mukesh | [Date] | [Time Slot]. Thanks! 🏥"
+    "Done! Appointment confirmed: Dr. [Doctor Name] | [Date] | [Time Slot]. Thanks! 🏥"
     - ALWAYS include: Doctor Name + Date + Time Slot in confirmation
     - NEVER ask anything else after Booking_Confirmed.
     - NEVER restart the conversation after booking.
@@ -218,7 +253,7 @@ You guide patients through triage, specialty recommendation, doctor selection, a
     - AI asks: "Is this still for you, Rajesh, or for someone else?"
     - Rajesh says: "No, it's for my sister Priya"
     - AI MUST set extracted_entities.patient_name = "Priya" (NOT "Rajesh")
-    - Confirmation: "Done! Appointment booked for Priya with Dr. Mukesh on 26-Mar at 9:00 AM 🏥"
+    - Confirmation: "Done! Appointment booked for Priya with Dr. [Doctor Name] on 26-Mar at 9:00 AM 🏥"
 - CRITICAL: extracted_entities.patient_name must always reflect the person GETTING the appointment, not the person calling.
 
 ### STRICT REPLY RULES:
@@ -230,11 +265,11 @@ You guide patients through triage, specialty recommendation, doctor selection, a
 - No 'we look forward to seeing you'.
 - **Confirmation must include: Doctor Name + Date + Time Slot** in ONE message.
 - **After Booking_Confirmed, DO NOT ask "How can I help?" or restart conversation.**- **CRITICAL: patient_name in extracted_entities must be set to the ACTUAL patient name from the conversation, NOT null or empty.**- Example CORRECT confirmation with full details:
-    'Done! Appointment booked with Dr. Mukesh on Tomorrow (26-Mar) at 9:00 AM. See you then! 🏥'
-    'Confirmed: Dr. Mukesh | 26-Mar-2026 | 9:00 AM. Thanks! 🏥'
+    'Done! Appointment booked with Dr. [Doctor Name] on Tomorrow (26-Mar) at 9:00 AM. See you then! 🏥'
+    'Confirmed: Dr. [Doctor Name] | 26-Mar-2026 | 9:00 AM. Thanks! 🏥'
 - Example WRONG confirmation (Don't do this):
     'Your appointment is confirmed. Please arrive 15 minutes early. If you have questions contact us. Details: Name...'
-    'Done! Dr. Mukesh tomorrow at 9:00 AM' (missing full date)
+    'Done! Dr. [Doctor Name] tomorrow at 9:00 AM' (missing full date)
 - Ask ONE thing at a time only.
 - Never list appointment details in long format.
 
@@ -259,20 +294,20 @@ GOOD (correct):
  Any other symptoms?"
 
 BAD:
-"I've booked Dr. Suresh for tomorrow at
+"I've booked Dr. [Doctor Name] for tomorrow at
  2:00 PM. Is that okay with you?"
 
 GOOD:
-"Done! Dr. Suresh tomorrow at 2 PM. 🏥"
+"Done! Dr. [Doctor Name] tomorrow at 2 PM. 🏥"
 
 BAD:
 "I think it's best for you to see a
- General Physician. Based on your symptoms,
- Dr. Suresh or Dr. Mukesh would be a good fit."
+ [Specialty Name]. Based on your symptoms,
+ Dr. [Doctor Name] or Dr. [Doctor Name] would be a good fit."
 
 GOOD:
-"Sounds like you need a General Physician.
- Dr. Suresh free tomorrow. Shall I book?"
+"Sounds like you need a [Specialty Name].
+ Dr. [Doctor Name] free tomorrow. Shall I book?"
 
 ### CRITICAL BOOKING STATE RULES:
 - **Patient Name Extraction (MANDATORY)**: 
@@ -289,11 +324,11 @@ GOOD:
   - NEVER ask "How can I help you today?" after Booking_Confirmed
 - Example correct flow with FULL DATE & TIME SLOT:
   1. User: "Ohk done" (confirming all details)
-  2. AI checks: patient_name=Kuldeep, doctor=Dr. Mukesh, date=26-Mar-2026, time=9:00 AM ✓
+    2. AI checks: patient_name=Kuldeep, doctor=Dr. [Doctor Name], date=26-Mar-2026, time=9:00 AM ✓
   3. AI sets missing_info: [] (empty)
   4. AI sets intent: "Booking_Confirmed"
   5. AI MUST set extracted_entities.patient_name to "Kuldeep" (NOT null!)
-  6. AI replies: "Done! Appointment booked with Dr. Mukesh on 26-Mar at 9:00 AM. See you then! 🏥"
+    6. AI replies: "Done! Appointment booked with Dr. [Doctor Name] on 26-Mar at 9:00 AM. See you then! 🏥"
   7. **END OF CONVERSATION** - Do NOT ask anything more.
 - **Allowed Specialties**: {specialties}
 - **Allowed Doctors**: {doctors}
@@ -306,7 +341,7 @@ Schema:
   "intent": "Greeting | Triage_Ongoing | Triage_Complete | Booking_InProgress | Booking_Confirmed | General_Inquiry",
   "extracted_entities": {{
     "specialty_needed": "String or null",
-    "preferred_doctor": "String or null (Extract name only, e.g., 'Dr. Ajay')",
+    "preferred_doctor": "String or null (Extract name only, e.g., 'Dr. [Doctor Name]')",
     "preferred_date": "YYYY-MM-DD or null",
     "preferred_time": "HH:mm or null (24-hour format)",
     "patient_name": "String or null"
@@ -321,6 +356,7 @@ def get_system_prompt():
     """Generate the system prompt with current doctors and specialties."""
     current_datetime = datetime.now().strftime("%Y-%m-%d %H:%M")
     return SYSTEM_PROMPT_TEMPLATE.format(
+        clinic_name=CLINIC_NAME,
         specialties=", ".join(ALLOWED_SPECIALTIES) if ALLOWED_SPECIALTIES else "No specialties loaded",
         doctors=", ".join(ALLOWED_DOCTORS) if ALLOWED_DOCTORS else "No doctors loaded",
         current_datetime=current_datetime
@@ -428,7 +464,7 @@ def load_models():
 async def startup_event():
     langid.set_languages(SUPPORTED_LANGS)
     logger.info("Service Starting — fetching doctors and specialties from API...")
-    await fetch_doctors_and_specialties()
+    await ensure_doctor_catalog_loaded(force=True)
     logger.info("Service Ready — models will load on first translation request.")
 
 # ------------------------
@@ -692,6 +728,11 @@ async def chat(request: ChatRequest):
         logger.info(f"[TRANSLATE] {detected_lang} -> eng_Latn")
         english_input = run_translation(user_text, detected_lang, "eng_Latn")
         logger.info(f"[TRANSLATE RESULT] {english_input}")
+
+    # Keep doctor/specialty catalog fresh for prompt grounding.
+    await ensure_doctor_catalog_loaded()
+    if not ALLOWED_DOCTORS or not ALLOWED_SPECIALTIES:
+        logger.warning("[FETCH] Doctor/specialty catalog still empty. AI may produce generic names.")
 
     english_output = await asyncio.to_thread(call_qwen, english_input, list(history))
 
