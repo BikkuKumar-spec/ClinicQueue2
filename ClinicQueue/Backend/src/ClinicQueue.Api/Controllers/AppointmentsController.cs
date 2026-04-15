@@ -11,7 +11,7 @@ using Microsoft.AspNetCore.Mvc;
 namespace ClinicQueue.Api.Controllers;
 
 [ApiController]
-[Authorize]
+//[Authorize]
 [Route("api/[controller]")]
 public class AppointmentsController(ISender sender) : ControllerBase
 {

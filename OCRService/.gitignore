@@ -45,3 +45,6 @@ log_output/
 # OS files
 .DS_Store
 Thumbs.db
+# Your specific environment folder names
+TranslationService/ts/
+OCRService/or/

@@ -5,15 +5,15 @@ VisualStudioVersion = 17.0.31903.59
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{BC59FD87-8372-4CA8-B669-D9725EFD7BC4}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ClinicQueue.Domain", "src\ClinicQueue.Domain\ClinicQueue.Domain.csproj", "{F872A6CE-647E-4665-8272-7EBE6F34B02F}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ClinicQueue.Domain", "Backend\src\ClinicQueue.Domain\ClinicQueue.Domain.csproj", "{F872A6CE-647E-4665-8272-7EBE6F34B02F}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ClinicQueue.Application", "src\ClinicQueue.Application\ClinicQueue.Application.csproj", "{A17EF152-59FE-42CF-83E6-C18102074400}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ClinicQueue.Application", "Backend\src\ClinicQueue.Application\ClinicQueue.Application.csproj", "{A17EF152-59FE-42CF-83E6-C18102074400}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ClinicQueue.Infrastructure", "src\ClinicQueue.Infrastructure\ClinicQueue.Infrastructure.csproj", "{9999CF06-CA49-4A68-90FC-BA88AB802025}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ClinicQueue.Infrastructure", "Backend\src\ClinicQueue.Infrastructure\ClinicQueue.Infrastructure.csproj", "{9999CF06-CA49-4A68-90FC-BA88AB802025}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ClinicQueue.Contracts", "src\ClinicQueue.Contracts\ClinicQueue.Contracts.csproj", "{3A3484F0-6639-42C8-AE95-3549FAE03799}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ClinicQueue.Contracts", "Backend\src\ClinicQueue.Contracts\ClinicQueue.Contracts.csproj", "{3A3484F0-6639-42C8-AE95-3549FAE03799}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ClinicQueue.Api", "src\ClinicQueue.Api\ClinicQueue.Api.csproj", "{F82E15DA-02C8-4CA1-9F53-08C94DD5AE3B}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ClinicQueue.Api", "Backend\src\ClinicQueue.Api\ClinicQueue.Api.csproj", "{F82E15DA-02C8-4CA1-9F53-08C94DD5AE3B}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution

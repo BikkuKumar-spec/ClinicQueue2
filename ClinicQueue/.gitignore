@@ -75,3 +75,8 @@ TranslationService/venv/
 *.pyc
 bin/
 obj/
+
+
+# Specific AI Virtual Environments
+TranslationService/ts/
+OCRService/or/
